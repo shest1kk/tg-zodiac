@@ -1,0 +1,6 @@
+aiogram==3.22.0
+APScheduler==3.11.1
+SQLAlchemy==2.0.44
+aiosqlite==0.21.0
+asyncpg==0.29.0
+python-dotenv==1.2.1

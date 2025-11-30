@@ -1,0 +1,110 @@
+========================================
+  БЫСТРЫЙ СТАРТ НА VPS (TERMIUS)
+========================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ШАГ 1: УСТАНОВКА DOCKER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+sudo usermod -aG docker $USER
+
+# ⚠️ ПЕРЕПОДКЛЮЧИТЕСЬ К СЕРВЕРУ!
+
+docker --version
+docker compose version
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ШАГ 2: ЗАГРУЗКА ПРОЕКТА
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Вариант A: Через Git
+mkdir -p ~/projects && cd ~/projects
+git clone YOUR_REPO_URL
+cd tg-zodiac
+
+# Вариант B: Через SFTP в Termius
+# - Откройте SFTP в Termius
+# - Перетащите папку проекта
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ШАГ 3: СОЗДАНИЕ .env ФАЙЛА
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+nano .env
+
+# Вставьте (замените значения):
+TG_TOKEN=ваш_токен_бота
+ADMIN_ID=ваш_id1,ваш_id2
+DAILY_HOUR=9
+DAILY_MINUTE=0
+
+# Сохраните: Ctrl+O, Enter, Ctrl+X
+
+chmod 600 .env
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ШАГ 4: ЗАПУСК
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+docker compose up -d --build
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ШАГ 5: ПРОВЕРКА
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Статус
+docker compose ps
+
+# Логи
+docker compose logs -f bot
+
+# Выход из логов: Ctrl+C
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ОСНОВНЫЕ КОМАНДЫ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Логи бота
+docker compose logs -f bot
+
+# Перезапуск после изменений
+docker compose up -d --build --force-recreate bot
+
+# Статус контейнеров
+docker compose ps
+
+# Остановка
+docker compose stop
+
+# Обновление кода (если Git)
+cd ~/projects/tg-zodiac
+git pull
+docker compose up -d --build --force-recreate bot
+
+# Полная перезагрузка
+docker compose down && docker compose up -d --build
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+РЕШЕНИЕ ПРОБЛЕМ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Проверить логи ошибок
+docker compose logs bot | grep -i error
+
+# Проверить переменные окружения
+docker compose exec bot env | grep TG_TOKEN
+
+# Перезапустить PostgreSQL
+docker compose restart postgres
+
+# Полная очистка (⚠️ удалит данные!)
+docker compose down -v
+docker compose up -d --build
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Полная инструкция: VPS_DEPLOY.md
+Быстрый старт: VPS_QUICKSTART.md
+
