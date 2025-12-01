@@ -14,6 +14,12 @@ from resilience import safe_send_message, safe_send_photo, RATE_LIMIT_DELAY
 bot = Bot(TG_TOKEN)
 dp = Dispatcher()
 
+# Хранилище для отслеживания режима отправки вопроса
+user_question_mode = {}
+
+# Хранилище для режима ответа админа пользователю (admin_id -> user_id)
+admin_reply_mode = {}
+
 # ----------------- Keyboard -----------------
 def zodiac_keyboard():
     inline_keyboard = [
@@ -42,6 +48,8 @@ def zodiac_keyboard():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     """Обработчик команды /start"""
+    # Сбрасываем флаг режима вопроса при использовании других команд
+    user_question_mode.pop(message.from_user.id, None)
     try:
         # Проверяем, новый ли пользователь, чтобы сохранить дату первого запуска
         async with AsyncSessionLocal() as session:
@@ -106,16 +114,50 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     """Обработчик команды /help"""
+    # Сбрасываем флаг режима вопроса при использовании других команд
+    user_question_mode.pop(message.from_user.id, None)
+    
     help_text = (
         "🌟 <b>Доступные команды:</b>\n\n"
         "/start - Выбрать знак зодиака и подписаться на рассылку\n"
         "/today - Посмотреть гороскоп на сегодня\n"
         "/change_zodiac - Изменить свой знак зодиака\n"
         "/my_info - Информация о твоей подписке\n"
-        "/unsubscribe - Отписаться от ежедневных прогнозов\n\n"
+        "/unsubscribe - Отписаться от ежедневных прогнозов\n"
+        "/question - Задать вопрос или оставить отзыв\n\n"
         f"📅 Рассылка происходит ежедневно в {DAILY_HOUR:02d}:{DAILY_MINUTE:02d} по МСК"
     )
+    
+    # Если админ - добавляем админские команды
+    if is_admin(message.from_user.id):
+        help_text += (
+            "\n\n"
+            "🔐 <b>Админские команды:</b>\n"
+            "<b>/admin</b> - Админ-панель\n"
+            "<b>/stats</b> - Статистика бота\n"
+            "<b>/reply</b> - Ответить пользователю\n"
+            "<b>/broadcast</b> - Массовая рассылка\n"
+            "<b>/test_send</b> - Тестовая отправка\n"
+            "<b>/set_prediction</b> - Редактировать предсказания"
+        )
+    
     await message.answer(help_text, parse_mode="HTML")
+
+@dp.message(Command("question"))
+async def cmd_question(message: types.Message):
+    """Обработчик команды /question - отправляет инструкцию и активирует режим вопроса"""
+    # Админы не могут использовать команду /question
+    if is_admin(message.from_user.id):
+        await message.answer("❌ Эта команда недоступна для администраторов.")
+        return
+    
+    question_text = (
+        "Если у тебя что-то не работает или есть предложения по улучшению бота, "
+        "просто напиши сюда в чат - мы прочитаем и починим!"
+    )
+    await message.answer(question_text)
+    # Устанавливаем флаг, что пользователь находится в режиме отправки вопроса
+    user_question_mode[message.from_user.id] = True
 
 @dp.message(Command("today"))
 async def cmd_today(message: types.Message):
@@ -787,6 +829,94 @@ async def cmd_test_send(message: types.Message):
         logger.error(f"Ошибка при тестовой отправке: {e}")
         await message.answer(f"❌ Ошибка: {e}")
 
+@dp.callback_query(F.data.startswith("quick_reply_"))
+async def quick_reply_callback(cb: types.CallbackQuery):
+    """Обработчик кнопки 'Быстро ответить' - активирует режим ответа"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        # Извлекаем ID пользователя из callback_data
+        user_id = int(cb.data.split("_")[-1])
+        
+        # Активируем режим ответа
+        admin_reply_mode[cb.from_user.id] = user_id
+        
+        await cb.answer("✅ Режим ответа активирован", show_alert=False)
+        await cb.message.answer(
+            f"💬 Режим ответа активирован для пользователя {user_id}.\n\n"
+            "Теперь можешь отправить:\n"
+            "• Текст - будет отправлен как ответ\n"
+            "• Фото + текст - будет отправлено фото с текстом\n"
+            "• Только фото - будет отправлено фото\n\n"
+            "Для отмены используй: /reply cancel"
+        )
+        logger.info(f"Админ {cb.from_user.id} активировал режим ответа для пользователя {user_id} через кнопку")
+    except (ValueError, IndexError) as e:
+        logger.error(f"Ошибка при обработке quick_reply: {e}")
+        await cb.answer("❌ Ошибка при активации режима ответа", show_alert=True)
+
+@dp.message(Command("reply"))
+async def cmd_reply(message: types.Message):
+    """Ответ администратора пользователю на его вопрос
+    
+    Формат: /reply USER_ID [текст]
+    Если текст указан - отправляется сразу
+    Если текст не указан - активируется режим ответа, можно отправить фото+текст
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split(maxsplit=2)
+        
+        if len(parts) < 2:
+            await message.answer(
+                "❌ Формат: /reply USER_ID [текст]\n\n"
+                "Примеры:\n"
+                "/reply 123456789 Привет! - отправит ответ сразу\n"
+                "/reply 123456789 - активирует режим ответа, можно отправить фото+текст\n\n"
+                "Для отмены режима ответа используй: /reply cancel"
+            )
+            return
+        
+        # Отмена режима ответа
+        if parts[1].lower() == "cancel":
+            admin_reply_mode.pop(message.from_user.id, None)
+            await message.answer("✅ Режим ответа отменен")
+            return
+        
+        user_id = int(parts[1])
+        
+        # Если текст указан - отправляем сразу
+        if len(parts) > 2:
+            reply_text = parts[2]
+            success = await safe_send_message(bot, user_id, reply_text)
+            if success:
+                await message.answer(f"✅ Ответ отправлен пользователю {user_id}")
+                logger.info(f"Админ {message.from_user.id} отправил ответ пользователю {user_id}")
+            else:
+                await message.answer(f"❌ Не удалось отправить ответ пользователю {user_id}")
+        else:
+            # Активируем режим ответа
+            admin_reply_mode[message.from_user.id] = user_id
+            await message.answer(
+                f"💬 Режим ответа активирован для пользователя {user_id}.\n\n"
+                "Теперь можешь отправить:\n"
+                "• Текст - будет отправлен как ответ\n"
+                "• Фото + текст - будет отправлено фото с текстом\n"
+                "• Только фото - будет отправлено фото\n\n"
+                "Для отмены используй: /reply cancel"
+            )
+        
+    except ValueError:
+        await message.answer("❌ Неверный формат USER_ID. Должно быть число.")
+    except Exception as e:
+        logger.error(f"Ошибка при ответе пользователю: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
 @dp.callback_query(F.data == "admin_back")
 async def admin_back(cb: types.CallbackQuery):
     """Возврат в главное меню админа"""
@@ -976,11 +1106,54 @@ admin_photo_storage = {}
 
 @dp.message(F.photo)
 async def admin_photo_handler(message: types.Message):
-    """Обработка фото от админа для массовой рассылки"""
+    """Обработка фото от админа для массовой рассылки или ответа пользователю"""
     if not is_admin(message.from_user.id):
         return
     
-    # Сохраняем фото для возможной рассылки
+    # Если админ в режиме ответа пользователю - обрабатываем как ответ
+    if message.from_user.id in admin_reply_mode:
+        user_id_to_reply = admin_reply_mode[message.from_user.id]
+        
+        try:
+            has_text = bool(message.text or (message.caption and message.caption.strip()))
+            has_photo = bool(message.photo)
+            
+            # Отправляем ответ пользователю
+            if has_photo and has_text:
+                # Фото с текстом
+                text_content = message.text or message.caption
+                success = await safe_send_photo(
+                    bot,
+                    user_id_to_reply,
+                    message.photo[-1].file_id,
+                    caption=text_content
+                )
+            elif has_photo:
+                # Только фото
+                success = await safe_send_photo(
+                    bot,
+                    user_id_to_reply,
+                    message.photo[-1].file_id
+                )
+            else:
+                # Не должно произойти, так как это обработчик фото
+                return
+            
+            if success:
+                await message.answer(f"✅ Ответ отправлен пользователю {user_id_to_reply}")
+                logger.info(f"Админ {message.from_user.id} отправил ответ пользователю {user_id_to_reply}")
+                # Сбрасываем режим ответа после успешной отправки
+                admin_reply_mode.pop(message.from_user.id, None)
+            else:
+                await message.answer(f"❌ Не удалось отправить ответ пользователю {user_id_to_reply}")
+        
+        except Exception as e:
+            logger.error(f"Ошибка при отправке ответа пользователю: {e}")
+            await message.answer(f"❌ Ошибка при отправке ответа: {e}")
+        
+        return  # Важно! Прерываем обработку, чтобы не сохранять фото для рассылки
+    
+    # Если НЕ в режиме ответа - сохраняем фото для массовой рассылки
     photo_file_id = message.photo[-1].file_id
     caption = message.caption or ""
     admin_photo_storage[message.from_user.id] = {
@@ -1007,11 +1180,139 @@ async def admin_photo_handler(message: types.Message):
 @dp.message()
 async def handle_unknown(message: types.Message):
     """Обработчик неизвестных команд и сообщений"""
+    # Сбрасываем флаг режима вопроса при любой команде
     if message.text and message.text.startswith("/"):
+        user_question_mode.pop(message.from_user.id, None)
+        admin_reply_mode.pop(message.from_user.id, None)  # Сбрасываем и режим ответа
         await message.answer(
             "Неизвестная команда. Используй /help для списка доступных команд."
         )
-    # Игнорируем обычные сообщения
+        return
+    
+    # Если админ в режиме ответа пользователю - отправляем ответ
+    if is_admin(message.from_user.id) and message.from_user.id in admin_reply_mode:
+        user_id_to_reply = admin_reply_mode[message.from_user.id]
+        
+        try:
+            has_text = bool(message.text or (message.caption and message.caption.strip()))
+            has_photo = bool(message.photo)
+            
+            # Отправляем ответ пользователю
+            if has_photo and has_text:
+                # Фото с текстом
+                text_content = message.text or message.caption
+                success = await safe_send_photo(
+                    bot,
+                    user_id_to_reply,
+                    message.photo[-1].file_id,
+                    caption=text_content
+                )
+            elif has_photo:
+                # Только фото
+                success = await safe_send_photo(
+                    bot,
+                    user_id_to_reply,
+                    message.photo[-1].file_id
+                )
+            elif has_text:
+                # Только текст
+                text_content = message.text or message.caption
+                success = await safe_send_message(bot, user_id_to_reply, text_content)
+            else:
+                await message.answer("❌ Отправь текст или фото с текстом")
+                return
+            
+            if success:
+                await message.answer(f"✅ Ответ отправлен пользователю {user_id_to_reply}")
+                logger.info(f"Админ {message.from_user.id} отправил ответ пользователю {user_id_to_reply}")
+                # Сбрасываем режим ответа после успешной отправки
+                admin_reply_mode.pop(message.from_user.id, None)
+            else:
+                await message.answer(f"❌ Не удалось отправить ответ пользователю {user_id_to_reply}")
+        
+        except Exception as e:
+            logger.error(f"Ошибка при отправке ответа пользователю: {e}")
+            await message.answer(f"❌ Ошибка при отправке ответа: {e}")
+        
+        return
+    
+    # Если пользователь в режиме вопроса - пересылаем сообщение администраторам
+    if user_question_mode.get(message.from_user.id):
+        # Формируем информацию о пользователе
+        user_info = (
+            f"👤 <b>Вопрос от пользователя:</b>\n"
+            f"ID: {message.from_user.id}\n"
+            f"Имя: {message.from_user.first_name or 'Не указано'}\n"
+            f"Username: @{message.from_user.username or 'нет'}\n\n"
+        )
+        
+        # Проверяем тип сообщения
+        has_text = bool(message.text or (message.caption and message.caption.strip()))
+        has_photo = bool(message.photo)
+        
+        # Если только фото без текста - просим добавить текст
+        if has_photo and not has_text:
+            await message.answer(
+                "❌ Пожалуйста, напиши текст к фото и отправь фото с текстом вместе. "
+                "Мы не можем обработать только фото без описания."
+            )
+            # Не сбрасываем флаг, пользователь может попробовать еще раз
+            return
+        
+        # Создаем кнопку "Быстро ответить" с ID пользователя
+        reply_keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(
+                text="💬 Быстро ответить",
+                callback_data=f"quick_reply_{message.from_user.id}"
+            )]
+        ])
+        
+        # Пересылаем сообщение всем администраторам
+        if ADMIN_IDS:
+            forwarded_count = 0
+            for admin_id in ADMIN_IDS:
+                try:
+                    success = False
+                    # Если есть текст и фото - отправляем фото с текстом
+                    if has_photo and has_text:
+                        text_content = message.text or message.caption
+                        full_caption = f"{user_info}💬 <b>Сообщение:</b>\n{text_content}"
+                        success = await safe_send_photo(
+                            bot, 
+                            admin_id, 
+                            message.photo[-1].file_id,
+                            caption=full_caption,
+                            parse_mode="HTML",
+                            reply_markup=reply_keyboard
+                        )
+                    # Если только текст - отправляем только текст
+                    elif has_text:
+                        text_content = message.text or message.caption
+                        full_message = f"{user_info}💬 <b>Сообщение:</b>\n{text_content}"
+                        success = await safe_send_message(bot, admin_id, full_message, parse_mode="HTML", reply_markup=reply_keyboard)
+                    else:
+                        # Другие типы медиа (видео, документ) - не обрабатываем специально
+                        caption = message.caption or ""
+                        if caption:
+                            full_message = f"{user_info}💬 <b>Сообщение:</b>\n{caption}"
+                            success = await safe_send_message(bot, admin_id, full_message, parse_mode="HTML", reply_markup=reply_keyboard)
+                        else:
+                            # Если нет текста и это не фото - игнорируем
+                            continue
+                    
+                    if success:
+                        forwarded_count += 1
+                except Exception as e:
+                    logger.error(f"Ошибка при пересылке сообщения администратору {admin_id}: {e}")
+            
+            # Подтверждаем пользователю, что сообщение отправлено
+            if forwarded_count > 0:
+                await message.answer("✅ Спасибо! Мы получили твое сообщение и обязательно прочитаем его.")
+            else:
+                await message.answer("❌ Произошла ошибка при отправке сообщения. Попробуй позже.")
+        
+        # Сбрасываем флаг после отправки
+        user_question_mode.pop(message.from_user.id, None)
 
 # ----------------- Main -----------------
 async def setup_bot_commands():
@@ -1023,6 +1324,7 @@ async def setup_bot_commands():
         BotCommand(command="change_zodiac", description="🔄 Изменить знак зодиака"),
         BotCommand(command="my_info", description="👤 Моя информация"),
         BotCommand(command="unsubscribe", description="❌ Отписаться от рассылки"),
+        BotCommand(command="question", description="💬 Задать вопрос"),
         BotCommand(command="help", description="ℹ️ Помощь и справка"),
     ]
     
@@ -1038,6 +1340,7 @@ async def setup_bot_commands():
             admin_commands = user_commands + [
                 BotCommand(command="admin", description="🔐 Админ-панель"),
                 BotCommand(command="stats", description="📊 Статистика"),
+                BotCommand(command="reply", description="💬 Ответить пользователю"),
             ]
             for admin_id in ADMIN_IDS:
                 try:
