@@ -132,7 +132,6 @@ async def cmd_help(message: types.Message):
     help_text = (
         "🌟 <b>Доступные команды:</b>\n\n"
         "/start - Выбрать знак зодиака и подписаться на рассылку\n"
-        "/today - Посмотреть гороскоп на сегодня\n"
         "/change_zodiac - Изменить свой знак зодиака\n"
         "/my_info - Информация о твоей подписке\n"
         "/unsubscribe - Отписаться от ежедневных прогнозов\n"
@@ -170,41 +169,6 @@ async def cmd_question(message: types.Message):
     await message.answer(question_text)
     # Устанавливаем флаг, что пользователь находится в режиме отправки вопроса
     user_question_mode[message.from_user.id] = True
-
-@dp.message(Command("today"))
-async def cmd_today(message: types.Message):
-    """Обработчик команды /today - показать прогноз на сегодня"""
-    try:
-        async with AsyncSessionLocal() as session:
-            user = await session.get(User, message.from_user.id)
-            
-            if not user or not user.zodiac:
-                await message.answer(
-                    "Ты еще не выбрал знак зодиака. Используй /start для выбора."
-                )
-                return
-            
-            # Получаем прогноз на сегодня
-            prediction_data, day_num = get_today_prediction(user.zodiac)
-            
-            if not prediction_data:
-                await message.answer(
-                    "К сожалению, прогноз на сегодня временно недоступен. Попробуй позже."
-                )
-                return
-            
-            zodiac_name = user.zodiac_name or ZODIAC_NAMES.get(user.zodiac, f"Знак #{user.zodiac}")
-            text = (
-                f"🌟 <b>Гороскоп на сегодня - {zodiac_name}</b>\n"
-                f"📅 День {day_num} из 31\n\n"
-                f"{prediction_data.get('prediction', '')}\n\n"
-                f"📝 <b>Задание:</b> {prediction_data.get('task', '')}"
-            )
-            await message.answer(text, parse_mode="HTML")
-            
-    except Exception as e:
-        logger.error(f"Ошибка при обработке /today: {e}")
-        await message.answer("Произошла ошибка. Попробуй позже.")
 
 @dp.message(Command("change_zodiac"))
 async def cmd_change_zodiac(message: types.Message):
@@ -1332,7 +1296,6 @@ async def setup_bot_commands():
     # Команды для обычных пользователей (без админских)
     user_commands = [
         BotCommand(command="start", description="🚀 Начать работу с ботом"),
-        BotCommand(command="today", description="🌟 Гороскоп на сегодня"),
         BotCommand(command="change_zodiac", description="🔄 Изменить знак зодиака"),
         BotCommand(command="my_info", description="👤 Моя информация"),
         BotCommand(command="unsubscribe", description="❌ Отписаться от рассылки"),
