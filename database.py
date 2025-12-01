@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime
 from sqlalchemy.exc import SQLAlchemyError
 from config import DATABASE_URL
 
@@ -12,7 +12,7 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
+    id = Column(BigInteger, primary_key=True)
     username = Column(String, nullable=True)
     first_name = Column(String, nullable=True)
     zodiac = Column(Integer, nullable=True)  # Оставляем для обратной совместимости
