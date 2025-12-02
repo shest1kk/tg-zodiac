@@ -790,8 +790,8 @@ async def cmd_test_send(message: types.Message):
         text = (
             f"🌟 Гороскоп на сегодня - {zodiac_name}\n"
             f"📅 День {day_num} из 31\n\n"
-            f"{prediction_data.get('prediction', '')}\n\n"
-            f"📝 Задание: {prediction_data.get('task', '')}"
+            f"🥠 {prediction_data.get('prediction', '')}\n\n"
+            f"📝 {prediction_data.get('task', '')}"
         )
         
         success = await safe_send_message(bot, user_id, text)
@@ -1052,7 +1052,7 @@ async def choose_zodiac(cb: types.CallbackQuery):
                                 f"🌟 <b>Гороскоп на сегодня - {zodiac_name}</b>\n"
                                 f"📅 День {day_num} из 31\n\n"
                                 f"{prediction_data.get('prediction', '')}\n\n"
-                                f"📝 <b>Задание:</b> {prediction_data.get('task', '')}"
+                                f"📝 {prediction_data.get('task', '')}"
                             )
                             await cb.message.answer(text, parse_mode="HTML")
                             logger.info(f"Отправлен текущий прогноз пользователю {cb.from_user.id} после выбора знака")
