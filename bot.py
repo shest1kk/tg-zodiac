@@ -790,7 +790,7 @@ async def cmd_test_send(message: types.Message):
         text = (
             f"🌟 Гороскоп на сегодня - {zodiac_name}\n"
             f"📅 День {day_num} из 31\n\n"
-            f"🥠 {prediction_data.get('prediction', '')}\n\n"
+            f"🥠 Предсказание: {prediction_data.get('prediction', '')}\n\n"
             f"📝 {prediction_data.get('task', '')}"
         )
         
@@ -1051,7 +1051,7 @@ async def choose_zodiac(cb: types.CallbackQuery):
                             text = (
                                 f"🌟 <b>Гороскоп на сегодня - {zodiac_name}</b>\n"
                                 f"📅 День {day_num} из 31\n\n"
-                                f"{prediction_data.get('prediction', '')}\n\n"
+                                f"🥠 Предсказание: {prediction_data.get('prediction', '')}\n\n"
                                 f"📝 {prediction_data.get('task', '')}"
                             )
                             await cb.message.answer(text, parse_mode="HTML")
