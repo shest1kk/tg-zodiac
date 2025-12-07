@@ -16,7 +16,7 @@ from raffle import (
     get_all_questions, get_question_by_id, update_question, get_all_raffle_dates,
     is_raffle_date, RAFFLE_ANSWER_TIME, RAFFLE_PARTICIPATION_WINDOW,
     create_or_get_raffle, stop_raffle, is_raffle_active,
-    get_raffle_by_date, get_last_active_raffle, has_raffle_started
+    get_raffle_by_date, get_last_active_raffle, has_raffle_started, RAFFLE_DATES
 )
 
 bot = Bot(TG_TOKEN)
@@ -1731,7 +1731,21 @@ async def admin_raffle_menu(cb: types.CallbackQuery):
         return
     
     try:
-        from raffle import RAFFLE_DATES
+        # RAFFLE_DATES уже импортирован в начале файла
+        # Проверяем, что RAFFLE_DATES загружен
+        logger.debug(f"RAFFLE_DATES: {RAFFLE_DATES}, тип: {type(RAFFLE_DATES)}, длина: {len(RAFFLE_DATES) if RAFFLE_DATES else 0}")
+        
+        if not RAFFLE_DATES or len(RAFFLE_DATES) == 0:
+            logger.error("RAFFLE_DATES пустой или не загружен!")
+            text = (
+                "🎁 <b>Розыгрыш</b>\n\n"
+                "❌ Ошибка: даты розыгрышей не найдены в конфигурации.\n\n"
+                "Проверьте файл raffle.py и убедитесь, что RAFFLE_DATES определен."
+            )
+            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")]]
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+            await cb.answer()
+            return
         
         # Получаем все розыгрыши из базы данных для проверки статуса
         async with AsyncSessionLocal() as session:
@@ -1768,13 +1782,19 @@ async def admin_raffle_menu(cb: types.CallbackQuery):
                 callback_data=f"admin_raffle_date_{raffle_date}"
             )])
         
-        buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")])
+        if not buttons:
+            # Если по какой-то причине кнопки не созданы
+            text = "🎁 <b>Розыгрыш</b>\n\n❌ Не удалось загрузить даты розыгрышей."
+            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")]]
+        else:
+            buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")])
         
         await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
         await cb.answer()
         
     except Exception as e:
         logger.error(f"Ошибка при открытии меню розыгрыша: {e}", exc_info=True)
+        logger.error(f"RAFFLE_DATES при ошибке: {RAFFLE_DATES if 'RAFFLE_DATES' in locals() else 'не загружен'}")
         await cb.answer("Ошибка", show_alert=True)
 
 @dp.callback_query(F.data.startswith("admin_raffle_date_"))
