@@ -5,11 +5,19 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BotCommand
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import select
-from database import AsyncSessionLocal, init_db, User
+from sqlalchemy import select, and_
+from database import AsyncSessionLocal, init_db, User, RaffleParticipant, Raffle
 from config import TG_TOKEN, DAILY_HOUR, DAILY_MINUTE, logger, ZODIAC_NAMES, ADMIN_ID, ADMIN_IDS
 from scheduler import start_scheduler, stop_scheduler, get_day_number, get_today_prediction, load_predictions
 from resilience import safe_send_message, safe_send_photo, RATE_LIMIT_DELAY
+from raffle import (
+    send_raffle_announcement, send_raffle_reminder, handle_raffle_participation,
+    save_user_answer, get_participants_by_question, approve_answer, deny_answer,
+    get_all_questions, get_question_by_id, update_question, get_all_raffle_dates,
+    is_raffle_date, RAFFLE_ANSWER_TIME, RAFFLE_PARTICIPATION_WINDOW,
+    create_or_get_raffle, stop_raffle, is_raffle_active,
+    get_raffle_by_date, get_last_active_raffle
+)
 
 bot = Bot(TG_TOKEN)
 dp = Dispatcher()
@@ -19,6 +27,9 @@ user_question_mode = {}
 
 # Хранилище для режима ответа админа пользователю (admin_id -> user_id)
 admin_reply_mode = {}
+
+# Хранилище для отслеживания участников розыгрыша (user_id -> raffle_date)
+raffle_participants = {}
 
 # ----------------- Keyboard -----------------
 def zodiac_keyboard():
@@ -219,6 +230,7 @@ def admin_keyboard():
         [types.InlineKeyboardButton(text="📤 Отправить рассылку сейчас", callback_data="admin_send_now")],
         [types.InlineKeyboardButton(text="📢 Массовая рассылка", callback_data="admin_broadcast")],
         [types.InlineKeyboardButton(text="📝 Редактировать предсказания", callback_data="admin_edit_predictions")],
+        [types.InlineKeyboardButton(text="🎁 Розыгрыш", callback_data="admin_raffle")],
         [types.InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users_list")],
         [types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [types.InlineKeyboardButton(text="📤 Тестовая отправка", callback_data="admin_test_send")]
@@ -254,6 +266,241 @@ async def admin_send_now(cb: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка при ручной рассылке: {e}")
         await cb.message.edit_text(f"❌ Ошибка при рассылке: {e}")
+
+@dp.message(Command("raffle_start"))
+async def cmd_raffle_start(message: types.Message):
+    """Ручной запуск розыгрыша (только для админа) - запускается немедленно"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split()
+        raffle_date = parts[1] if len(parts) > 1 else None
+        
+        # Если дата не указана, используем текущую дату
+        if not raffle_date:
+            moscow_tz = timezone(timedelta(hours=3))
+            current_date_str = datetime.now(moscow_tz).strftime("%Y-%m-%d")
+            raffle_date = current_date_str
+        
+        # Останавливаем активный розыгрыш, если он есть
+        active_raffle = await get_last_active_raffle()
+        if active_raffle and active_raffle.raffle_date != raffle_date:
+            await stop_raffle(active_raffle.raffle_date)
+            await message.answer(
+                f"⏸️ Остановлен предыдущий активный розыгрыш #{active_raffle.raffle_number} ({active_raffle.raffle_date})"
+            )
+        
+        # Создаем или получаем розыгрыш (force_activate=True активирует остановленный розыгрыш)
+        raffle = await create_or_get_raffle(raffle_date, force_activate=True)
+        if raffle:
+            raffle_number = raffle.raffle_number
+            status = "активирую" if not raffle.is_active else "запускаю"
+            await message.answer(f"⏳ {status.capitalize()} розыгрыш #{raffle_number} на {raffle_date} прямо сейчас...")
+        else:
+            await message.answer(f"⏳ Запускаю розыгрыш на {raffle_date} прямо сейчас...")
+        
+        # Получаем всех подписанных пользователей
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User).where(User.subscribed == True)
+            )
+            users = result.scalars().all()
+        
+        if not users:
+            await message.answer("❌ Нет подписанных пользователей для розыгрыша")
+            return
+        
+        success_count = 0
+        error_count = 0
+        
+        # Отправляем объявления всем подписанным пользователям
+        for user in users:
+            message_id = await send_raffle_announcement(bot, user.id, raffle_date)
+            if message_id:
+                success_count += 1
+                await asyncio.sleep(RATE_LIMIT_DELAY)
+            else:
+                error_count += 1
+        
+        await message.answer(
+            f"✅ Розыгрыш на {raffle_date} запущен!\n\n"
+            f"✅ Успешно отправлено: {success_count}\n"
+            f"❌ Ошибок: {error_count}"
+        )
+        
+        logger.info(f"Админ {message.from_user.id} запустил розыгрыш на {raffle_date}. Успешно: {success_count}, Ошибок: {error_count}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при ручном запуске розыгрыша: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("raffle_test_status"))
+async def cmd_raffle_test_status(message: types.Message):
+    """Проверка статуса розыгрыша (только для админа)"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer("❌ Использование: /raffle_test_status ДАТА (например: 2025-12-07)")
+            return
+        
+        raffle_date = parts[1]
+        
+        # Получаем розыгрыш
+        raffle = await get_raffle_by_date(raffle_date)
+        is_active = await is_raffle_active(raffle_date)
+        
+        # Вычисляем время закрытия
+        from datetime import time as dt_time
+        from raffle import MOSCOW_TZ
+        raffle_date_obj = datetime.strptime(raffle_date, "%Y-%m-%d").date()
+        close_time = datetime.combine(raffle_date_obj, dt_time(hour=23, minute=59))
+        close_time = close_time.replace(tzinfo=MOSCOW_TZ)
+        moscow_now = datetime.now(MOSCOW_TZ)
+        
+        status_text = "🟢 Активен" if is_active else "🔴 Закрыт"
+        
+        text = (
+            f"📊 <b>Статус розыгрыша {raffle_date}</b>\n\n"
+            f"Статус: {status_text}\n"
+        )
+        
+        if raffle:
+            text += f"Номер: #{raffle.raffle_number}\n"
+            text += f"Создан: {raffle.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            if raffle.stopped_at:
+                text += f"Остановлен: {raffle.stopped_at.strftime('%d.%m.%Y %H:%M')}\n"
+        
+        text += f"\nВремя закрытия: {close_time.strftime('%d.%m.%Y %H:%M')} МСК\n"
+        text += f"Текущее время: {moscow_now.strftime('%d.%m.%Y %H:%M')} МСК\n"
+        
+        if moscow_now > close_time:
+            text += "\n⏰ Время закрытия прошло"
+        else:
+            time_left = close_time - moscow_now
+            hours = int(time_left.total_seconds() // 3600)
+            minutes = int((time_left.total_seconds() % 3600) // 60)
+            text += f"\n⏳ До закрытия: {hours}ч {minutes}м"
+        
+        await message.answer(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при проверке статуса розыгрыша: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("raffle_test_list"))
+async def cmd_raffle_test_list(message: types.Message):
+    """Список всех розыгрышей с их статусами (только для админа)"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Raffle).order_by(Raffle.raffle_number.asc())
+            )
+            raffles = result.scalars().all()
+        
+        if not raffles:
+            await message.answer("📋 Розыгрышей пока нет.")
+            return
+        
+        text = "📋 <b>Список всех розыгрышей:</b>\n\n"
+        
+        from datetime import time as dt_time
+        from raffle import MOSCOW_TZ
+        moscow_now = datetime.now(MOSCOW_TZ)
+        
+        for raffle in raffles:
+            try:
+                date_obj = datetime.strptime(raffle.raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = raffle.raffle_date
+            
+            is_active = await is_raffle_active(raffle.raffle_date)
+            status_icon = "🟢" if is_active else "🔴"
+            
+            # Вычисляем время закрытия
+            close_time = datetime.combine(date_obj.date(), dt_time(hour=23, minute=59))
+            close_time = close_time.replace(tzinfo=MOSCOW_TZ)
+            
+            text += f"{status_icon} <b>Розыгрыш №{raffle.raffle_number}</b> от {date_display}\n"
+            if moscow_now > close_time:
+                text += f"   ⏰ Закрыт в 23:59\n"
+            else:
+                time_left = close_time - moscow_now
+                hours = int(time_left.total_seconds() // 3600)
+                minutes = int((time_left.total_seconds() % 3600) // 60)
+                text += f"   ⏳ Закроется через: {hours}ч {minutes}м\n"
+            text += "\n"
+        
+        await message.answer(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка розыгрышей: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("raffle_reload_scheduler"))
+async def cmd_raffle_reload_scheduler(message: types.Message):
+    """Перезагрузка планировщика розыгрышей (только для админа)"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        from scheduler import stop_scheduler, start_scheduler
+        
+        await message.answer("⏳ Перезагружаю планировщик розыгрышей...")
+        
+        # Останавливаем планировщик
+        stop_scheduler()
+        
+        # Запускаем заново (задачи пересоздадутся)
+        start_scheduler()
+        
+        await message.answer("✅ Планировщик розыгрышей перезагружен. Задачи обновлены.")
+        logger.info(f"Админ {message.from_user.id} перезагрузил планировщик розыгрышей")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при перезагрузке планировщика: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("raffle_stop"))
+async def cmd_raffle_stop(message: types.Message):
+    """Остановка последнего активного розыгрыша (только для админа)"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        # Получаем последний активный розыгрыш
+        active_raffle = await get_last_active_raffle()
+        
+        if not active_raffle:
+            await message.answer("❌ Нет активных розыгрышей для остановки")
+            return
+        
+        # Останавливаем розыгрыш
+        success = await stop_raffle(active_raffle.raffle_date)
+        
+        if success:
+            await message.answer(
+                f"✅ Розыгрыш #{active_raffle.raffle_number} ({active_raffle.raffle_date}) остановлен"
+            )
+            logger.info(f"Админ {message.from_user.id} остановил розыгрыш #{active_raffle.raffle_number} ({active_raffle.raffle_date})")
+        else:
+            await message.answer("❌ Ошибка при остановке розыгрыша")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при остановке розыгрыша: {e}")
+        await message.answer(f"❌ Ошибка при остановке розыгрыша: {e}")
 
 @dp.callback_query(F.data == "admin_edit_predictions")
 async def admin_edit_predictions(cb: types.CallbackQuery):
@@ -907,6 +1154,224 @@ async def admin_back(cb: types.CallbackQuery):
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
     await cb.answer()
 
+@dp.callback_query(F.data == "admin_edit_questions")
+async def admin_edit_questions_menu(cb: types.CallbackQuery):
+    """Меню редактирования вопросов - выбор даты"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        raffle_dates = get_all_raffle_dates()
+        
+        if not raffle_dates:
+            text = "❌ Даты розыгрышей не найдены."
+            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_raffle")]]
+            await cb.message.edit_text(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+            await cb.answer()
+            return
+        
+        text = "❓ <b>Редактирование вопросов</b>\n\nВыбери дату розыгрыша:\n\n"
+        
+        buttons = []
+        for raffle_date in sorted(raffle_dates):
+            try:
+                date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = raffle_date
+            
+            buttons.append([
+                types.InlineKeyboardButton(
+                    text=f"📅 {date_display}",
+                    callback_data=f"admin_questions_date_{raffle_date}"
+                )
+            ])
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_raffle")])
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при открытии меню редактирования вопросов: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+@dp.callback_query(F.data.startswith("admin_questions_date_"))
+async def admin_questions_date_menu(cb: types.CallbackQuery):
+    """Меню вопросов для конкретной даты"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        raffle_date = cb.data.split("_")[-1]
+        questions = get_all_questions(raffle_date)
+        
+        if not questions:
+            try:
+                date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = raffle_date
+            
+            text = f"❓ <b>Вопросы для {date_display}</b>\n\nВопросы не найдены."
+            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_edit_questions")]]
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+            await cb.answer()
+            return
+        
+        try:
+            date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = raffle_date
+        
+        text = f"❓ <b>Вопросы для {date_display}</b>\n\nВыбери вопрос для редактирования:\n\n"
+        
+        buttons = []
+        for question in questions:
+            question_id = question.get('id')
+            question_title = question.get('title', f'Вопрос #{question_id}')
+            buttons.append([
+                types.InlineKeyboardButton(
+                    text=f"❓ {question_title}",
+                    callback_data=f"admin_question_edit_{raffle_date}_{question_id}"
+                )
+            ])
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_edit_questions")])
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при открытии меню вопросов для даты: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+@dp.callback_query(F.data.startswith("admin_question_edit_"))
+async def admin_question_edit(cb: types.CallbackQuery):
+    """Просмотр и редактирование вопроса"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        parts = cb.data.split("_")
+        if len(parts) == 4:
+            # Старый формат без даты (для обратной совместимости)
+            question_id = int(parts[-1])
+            raffle_date = None
+        else:
+            # Новый формат с датой
+            raffle_date = parts[3]
+            question_id = int(parts[4])
+        
+        if not raffle_date:
+            await cb.answer("Необходимо указать дату розыгрыша", show_alert=True)
+            return
+        
+        question = get_question_by_id(question_id, raffle_date)
+        
+        if not question:
+            await cb.answer("Вопрос не найден", show_alert=True)
+            return
+        
+        try:
+            date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = raffle_date
+        
+        text = (
+            f"❓ <b>Вопрос #{question_id}</b>\n"
+            f"📅 Дата: {date_display}\n\n"
+            f"<b>Название:</b> {question.get('title', '')}\n"
+            f"<b>Текст:</b> {question.get('text', '')}\n\n"
+            f"Для редактирования отправь команду:\n"
+            f"<code>/edit_question {raffle_date} {question_id} Название | Текст вопроса</code>\n\n"
+            f"Пример:\n"
+            f"<code>/edit_question {raffle_date} {question_id} Забота о гостях | Назови ключевые слова, описывающие ценность 'забота о гостях'</code>"
+        )
+        
+        buttons = [
+            [types.InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"admin_questions_date_{raffle_date}")]
+        ]
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре вопроса: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+@dp.message(Command("edit_question"))
+async def cmd_edit_question(message: types.Message):
+    """Редактирование вопроса через команду"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split(maxsplit=3)
+        if len(parts) < 4:
+            await message.answer(
+                "❌ Неверный формат. Используй:\n"
+                "<code>/edit_question ДАТА ID Название | Текст</code>\n\n"
+                "Пример:\n"
+                "<code>/edit_question 2025-12-07 1 Забота о гостях | Назови ключевые слова, описывающие ценность 'забота о гостях'</code>",
+                parse_mode="HTML"
+            )
+            return
+        
+        raffle_date = parts[1]
+        question_id = int(parts[2])
+        content = parts[3]
+        
+        if "|" not in content:
+            await message.answer("❌ Используй разделитель | между названием и текстом вопроса")
+            return
+        
+        title, text = content.split("|", 1)
+        title = title.strip()
+        text = text.strip()
+        
+        if not title or not text:
+            await message.answer("❌ Название и текст вопроса не могут быть пустыми")
+            return
+        
+        # Проверяем, существует ли вопрос
+        existing_question = get_question_by_id(question_id, raffle_date)
+        if not existing_question:
+            await message.answer(f"❌ Вопрос с ID {question_id} для даты {raffle_date} не найден")
+            return
+        
+        # Обновляем вопрос
+        success = update_question(question_id, raffle_date, title, text)
+        
+        if success:
+            try:
+                date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = raffle_date
+            
+            await message.answer(
+                f"✅ Вопрос #{question_id} для {date_display} успешно обновлен!\n\n"
+                f"<b>Название:</b> {title}\n"
+                f"<b>Текст:</b> {text}",
+                parse_mode="HTML"
+            )
+            logger.info(f"Админ {message.from_user.id} обновил вопрос #{question_id} для даты {raffle_date}")
+        else:
+            await message.answer("❌ Ошибка при сохранении вопроса")
+            
+    except ValueError:
+        await message.answer("❌ ID вопроса должен быть числом")
+    except Exception as e:
+        logger.error(f"Ошибка при редактировании вопроса: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     """Обработчик команды /stats - статистика (только для админа)"""
@@ -1153,6 +1618,531 @@ async def admin_photo_handler(message: types.Message):
             parse_mode="HTML"
         )
 
+@dp.callback_query(F.data.startswith("raffle_join_"))
+async def raffle_join_callback(cb: types.CallbackQuery):
+    """Обработчик нажатия кнопки 'Принять участие' в розыгрыше"""
+    try:
+        raffle_date = cb.data.split("_")[-1]
+        
+        # Проверяем, не истекло ли время (2 часа с момента отправки объявления)
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(RaffleParticipant).where(
+                    and_(
+                        RaffleParticipant.user_id == cb.from_user.id,
+                        RaffleParticipant.raffle_date == raffle_date
+                    )
+                )
+            )
+            participant = result.scalar_one_or_none()
+            
+            if participant and participant.announcement_time:
+                # Проверяем, прошло ли 2 часа с момента отправки объявления (используем МСК)
+                from raffle import MOSCOW_TZ
+                moscow_now = datetime.now(MOSCOW_TZ)
+                # announcement_time сохраняется в UTC (без timezone), конвертируем в МСК
+                if participant.announcement_time.tzinfo is None:
+                    # timestamp без timezone - предполагаем что это UTC
+                    announcement_utc = participant.announcement_time.replace(tzinfo=timezone.utc)
+                    announcement_moscow = announcement_utc.astimezone(MOSCOW_TZ)
+                else:
+                    # Если есть timezone, конвертируем в МСК
+                    announcement_moscow = participant.announcement_time.astimezone(MOSCOW_TZ)
+                time_since_announcement = (moscow_now - announcement_moscow).total_seconds() / 3600
+                if time_since_announcement > RAFFLE_PARTICIPATION_WINDOW:
+                    await cb.answer(
+                        f"⏰ Время участия истекло. У тебя было {RAFFLE_PARTICIPATION_WINDOW} часа с момента получения объявления.",
+                        show_alert=True
+                    )
+                    return
+            elif not participant:
+                # Если записи нет, значит объявление было отправлено недавно, разрешаем участие
+                pass
+        
+        # Проверяем, активен ли розыгрыш
+        if not await is_raffle_active(raffle_date):
+            await cb.answer("⛔ Розыгрыш остановлен администратором.", show_alert=True)
+            return
+        
+        # Обрабатываем участие
+        success = await handle_raffle_participation(bot, cb.from_user.id, cb.message.message_id, raffle_date)
+        
+        if success:
+            await cb.answer("✅ Ты принял участие! Проверь сообщение выше.")
+            # Активируем режим ожидания ответа
+            raffle_participants[cb.from_user.id] = raffle_date
+        else:
+            await cb.answer("❌ Произошла ошибка или ты уже участвуешь в этом розыгрыше.", show_alert=True)
+            
+    except Exception as e:
+        logger.error(f"Ошибка при обработке участия в розыгрыше: {e}", exc_info=True)
+        await cb.answer("❌ Произошла ошибка. Попробуй позже.", show_alert=True)
+
+@dp.callback_query(F.data == "admin_raffle")
+async def admin_raffle_menu(cb: types.CallbackQuery):
+    """Меню админ-панели для розыгрышей - список дат"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        # Получаем все розыгрыши из базы данных
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Raffle).order_by(Raffle.raffle_number.desc())
+            )
+            raffles = result.scalars().all()
+        
+        if not raffles:
+            text = "🎁 <b>Розыгрыш</b>\n\nРозыгрышей пока нет."
+            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")]]
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+            await cb.answer()
+            return
+        
+        text = "🎁 <b>Розыгрыш</b>\n\nВыбери дату розыгрыша:\n\n"
+        
+        buttons = []
+        for raffle in raffles:
+            # Форматируем дату для отображения (07.12.2025 -> 07.12)
+            try:
+                date_obj = datetime.strptime(raffle.raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m")
+            except:
+                date_display = raffle.raffle_date
+            
+            # Проверяем активность с учетом времени закрытия
+            is_active = await is_raffle_active(raffle.raffle_date)
+            status_icon = "🟢" if is_active else "🔴"
+            button_text = f"{status_icon} Розыгрыш №{raffle.raffle_number} от {date_display}"
+            buttons.append([types.InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"admin_raffle_date_{raffle.raffle_date}"
+            )])
+        
+        # Добавляем кнопку редактирования вопросов
+        buttons.append([types.InlineKeyboardButton(
+            text="❓ Редактировать вопросы",
+            callback_data="admin_edit_questions"
+        )])
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")])
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при открытии меню розыгрыша: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+@dp.callback_query(F.data.startswith("admin_raffle_date_"))
+async def admin_raffle_date_menu(cb: types.CallbackQuery):
+    """Меню вопросов для конкретной даты розыгрыша"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        raffle_date = cb.data.split("_")[-1]
+        
+        # Получаем информацию о розыгрыше
+        raffle = await get_raffle_by_date(raffle_date)
+        if not raffle:
+            await cb.answer("Розыгрыш не найден", show_alert=True)
+            return
+        
+        # Получаем все вопросы для этой даты
+        questions = get_all_questions(raffle_date)
+        if not questions:
+            text = f"🎁 <b>Розыгрыш от {raffle_date}</b>\n\nВопросы не найдены."
+            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_raffle")]]
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+            await cb.answer()
+            return
+        
+        # Форматируем дату для отображения
+        try:
+            date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = raffle_date
+        
+        status = "🟢 Активен" if raffle.is_active else "🔴 Остановлен"
+        text = (
+            f"🎁 <b>Розыгрыш от {date_display}</b>\n"
+            f"#{raffle.raffle_number} | {status}\n\n"
+            f"Выбери вопрос для просмотра участников:"
+        )
+        
+        buttons = []
+        for question in questions:
+            buttons.append([types.InlineKeyboardButton(
+                text=question["title"],
+                callback_data=f"admin_raffle_question_{raffle_date}_{question['id']}"
+            )])
+        
+        # Добавляем кнопку остановки, если розыгрыш активен
+        if raffle.is_active:
+            buttons.append([types.InlineKeyboardButton(
+                text="⛔ Остановить розыгрыш",
+                callback_data=f"admin_raffle_stop_{raffle_date}"
+            )])
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_raffle")])
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при открытии меню вопросов для даты: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+@dp.callback_query(F.data.startswith("admin_raffle_question_"))
+async def admin_raffle_question(cb: types.CallbackQuery):
+    """Просмотр участников по вопросу"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        parts = cb.data.split("_")
+        raffle_date = parts[3]
+        question_id = int(parts[4])
+        
+        question = get_question_by_id(question_id, raffle_date)
+        if not question:
+            await cb.answer("Вопрос не найден", show_alert=True)
+            return
+        
+        participants = await get_participants_by_question(raffle_date, question_id)
+        
+        # Фильтруем только тех, кто нажал кнопку (question_id != 0)
+        active_participants = [p for p in participants if p.question_id != 0]
+        
+        text = f"📋 <b>{question['title']}</b>\n\n"
+        text += f"👥 Участников: {len(active_participants)}\n\n"
+        
+        if active_participants:
+            text += "Список участников:\n"
+            for i, p in enumerate(active_participants[:20], 1):  # Показываем первые 20
+                status = "✅ принят" if p.is_correct is True else ("❌ отклонен" if p.is_correct is False else "⏳ не проверен")
+                text += f"{i}. ID: {p.user_id} - {status}\n"
+            
+            if len(active_participants) > 20:
+                text += f"\n... и еще {len(active_participants) - 20} участников"
+        else:
+            text += "Участников пока нет."
+        
+        buttons = [
+            [types.InlineKeyboardButton(
+                text="🔍 Проверить результаты",
+                callback_data=f"admin_raffle_results_{raffle_date}_{question_id}"
+            )],
+            [types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_raffle_date_{raffle_date}")]
+        ]
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре участников: {e}")
+        await cb.answer("Ошибка", show_alert=True)
+
+@dp.callback_query(F.data.startswith("admin_raffle_stop_"))
+async def admin_raffle_stop(cb: types.CallbackQuery):
+    """Остановка розыгрыша"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        raffle_date = cb.data.split("_")[-1]
+        
+        # Подтверждение остановки
+        raffle = await get_raffle_by_date(raffle_date)
+        if not raffle:
+            await cb.answer("Розыгрыш не найден", show_alert=True)
+            return
+        
+        if not raffle.is_active:
+            await cb.answer("Розыгрыш уже остановлен", show_alert=True)
+            return
+        
+        # Останавливаем розыгрыш
+        success = await stop_raffle(raffle_date)
+        
+        if success:
+            await cb.answer("✅ Розыгрыш остановлен", show_alert=False)
+            # Возвращаемся в меню дат розыгрышей
+            await admin_raffle_menu(cb)
+        else:
+            await cb.answer("❌ Ошибка при остановке розыгрыша", show_alert=True)
+            
+    except Exception as e:
+        logger.error(f"Ошибка при остановке розыгрыша: {e}")
+        await cb.answer("Ошибка", show_alert=True)
+
+@dp.callback_query(F.data.startswith("admin_raffle_results_"))
+async def admin_raffle_results(cb: types.CallbackQuery):
+    """Просмотр результатов (ответов) по вопросу"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        parts = cb.data.split("_")
+        raffle_date = parts[3]
+        question_id = int(parts[4])
+        
+        question = get_question_by_id(question_id, raffle_date)
+        if not question:
+            await cb.answer("Вопрос не найден", show_alert=True)
+            return
+        
+        participants = await get_participants_by_question(raffle_date, question_id)
+        
+        # Фильтруем только тех, кто нажал кнопку (question_id != 0) и ответил
+        answered = [p for p in participants if p.question_id != 0 and p.answer is not None]
+        
+        text = f"📊 <b>Результаты: {question['title']}</b>\n\n"
+        
+        if answered:
+            for p in answered:
+                status_icon = "✅" if p.is_correct is True else ("❌" if p.is_correct is False else "⏳")
+                text += f"{status_icon} <b>ID: {p.user_id}</b>\n"
+                text += f"Ответ: {p.answer}\n"
+                text += f"Время: {p.timestamp.strftime('%d.%m.%Y %H:%M')}\n\n"
+        else:
+            text += "Ответов пока нет."
+        
+        buttons = [
+            [types.InlineKeyboardButton(text="◀️ Назад к вопросу", callback_data=f"admin_raffle_question_{raffle_date}_{question_id}")],
+            [types.InlineKeyboardButton(text="◀️ К списку дат", callback_data="admin_raffle")]
+        ]
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре результатов: {e}")
+        await cb.answer("Ошибка", show_alert=True)
+
+@dp.callback_query(F.data.startswith("admin_approve_"))
+async def callback_approve(cb: types.CallbackQuery):
+    """Принять ответ пользователя через кнопку"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        parts = cb.data.split("_")
+        user_id = int(parts[2])
+        raffle_date = parts[3] if len(parts) > 3 else None
+        
+        # Находим розыгрыш для этого пользователя
+        async with AsyncSessionLocal() as session:
+            if raffle_date:
+                result = await session.execute(
+                    select(RaffleParticipant).where(
+                        and_(
+                            RaffleParticipant.user_id == user_id,
+                            RaffleParticipant.raffle_date == raffle_date
+                        )
+                    )
+                )
+            else:
+                # Если дата не указана, берем последний розыгрыш
+                result = await session.execute(
+                    select(RaffleParticipant).where(
+                        RaffleParticipant.user_id == user_id
+                    ).order_by(RaffleParticipant.timestamp.desc())
+                )
+            participant = result.scalar_one_or_none()
+            
+            if not participant:
+                await cb.answer("❌ Участник не найден", show_alert=True)
+                return
+            
+            if participant.is_correct is not None:
+                status = "уже принят" if participant.is_correct else "уже отклонен"
+                await cb.answer(f"⚠️ Ответ {status}", show_alert=True)
+                return
+            
+            success = await approve_answer(user_id, participant.raffle_date)
+            
+            if success:
+                await cb.answer("✅ Ответ принят!", show_alert=False)
+                # Редактируем сообщение, убирая кнопки
+                try:
+                    await cb.message.edit_text(
+                        cb.message.text + "\n\n✅ <b>Ответ принят</b>",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+            else:
+                await cb.answer("❌ Ошибка при принятии ответа", show_alert=True)
+                
+    except (ValueError, IndexError) as e:
+        await cb.answer(f"❌ Ошибка: {e}", show_alert=True)
+    except Exception as e:
+        logger.error(f"Ошибка при принятии ответа: {e}")
+        await cb.answer("❌ Ошибка", show_alert=True)
+
+@dp.message(Command("approve"))
+async def cmd_approve(message: types.Message):
+    """Принять ответ пользователя (команда для обратной совместимости)"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer("❌ Формат: /approve USER_ID")
+            return
+        
+        user_id = int(parts[1])
+        
+        # Находим последний розыгрыш для этого пользователя
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(RaffleParticipant).where(
+                    RaffleParticipant.user_id == user_id
+                ).order_by(RaffleParticipant.timestamp.desc())
+            )
+            participant = result.scalar_one_or_none()
+            
+            if not participant:
+                await message.answer(f"❌ Участник {user_id} не найден")
+                return
+            
+            if participant.is_correct is not None:
+                status = "уже принят" if participant.is_correct else "уже отклонен"
+                await message.answer(f"⚠️ Ответ пользователя {user_id} {status}")
+                return
+            
+            success = await approve_answer(user_id, participant.raffle_date)
+            
+            if success:
+                await message.answer(f"✅ Ответ пользователя {user_id} принят!")
+            else:
+                await message.answer(f"❌ Ошибка при принятии ответа")
+                
+    except (ValueError, IndexError) as e:
+        await message.answer(f"❌ Неверный формат: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка при принятии ответа: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.callback_query(F.data.startswith("admin_deny_"))
+async def callback_deny(cb: types.CallbackQuery):
+    """Отклонить ответ пользователя через кнопку"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        parts = cb.data.split("_")
+        user_id = int(parts[2])
+        raffle_date = parts[3] if len(parts) > 3 else None
+        
+        # Находим розыгрыш для этого пользователя
+        async with AsyncSessionLocal() as session:
+            if raffle_date:
+                result = await session.execute(
+                    select(RaffleParticipant).where(
+                        and_(
+                            RaffleParticipant.user_id == user_id,
+                            RaffleParticipant.raffle_date == raffle_date
+                        )
+                    )
+                )
+            else:
+                # Если дата не указана, берем последний розыгрыш
+                result = await session.execute(
+                    select(RaffleParticipant).where(
+                        RaffleParticipant.user_id == user_id
+                    ).order_by(RaffleParticipant.timestamp.desc())
+                )
+            participant = result.scalar_one_or_none()
+            
+            if not participant:
+                await cb.answer("❌ Участник не найден", show_alert=True)
+                return
+            
+            if participant.is_correct is not None:
+                status = "уже принят" if participant.is_correct else "уже отклонен"
+                await cb.answer(f"⚠️ Ответ {status}", show_alert=True)
+                return
+            
+            success = await deny_answer(user_id, participant.raffle_date)
+            
+            if success:
+                await cb.answer("❌ Ответ отклонен", show_alert=False)
+                # Редактируем сообщение, убирая кнопки
+                try:
+                    await cb.message.edit_text(
+                        cb.message.text + "\n\n❌ <b>Ответ отклонен</b>",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+            else:
+                await cb.answer("❌ Ошибка при отклонении ответа", show_alert=True)
+                
+    except (ValueError, IndexError) as e:
+        await cb.answer(f"❌ Ошибка: {e}", show_alert=True)
+    except Exception as e:
+        logger.error(f"Ошибка при отклонении ответа: {e}")
+        await cb.answer("❌ Ошибка", show_alert=True)
+
+@dp.message(Command("deny"))
+async def cmd_deny(message: types.Message):
+    """Отклонить ответ пользователя (команда для обратной совместимости)"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer("❌ Формат: /deny USER_ID")
+            return
+        
+        user_id = int(parts[1])
+        
+        # Находим последний розыгрыш для этого пользователя
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(RaffleParticipant).where(
+                    RaffleParticipant.user_id == user_id
+                ).order_by(RaffleParticipant.timestamp.desc())
+            )
+            participant = result.scalar_one_or_none()
+            
+            if not participant:
+                await message.answer(f"❌ Участник {user_id} не найден")
+                return
+            
+            if participant.is_correct is not None:
+                status = "уже принят" if participant.is_correct else "уже отклонен"
+                await message.answer(f"⚠️ Ответ пользователя {user_id} {status}")
+                return
+            
+            success = await deny_answer(user_id, participant.raffle_date)
+            
+            if success:
+                await message.answer(f"❌ Ответ пользователя {user_id} отклонен")
+            else:
+                await message.answer(f"❌ Ошибка при отклонении ответа")
+                
+    except (ValueError, IndexError) as e:
+        await message.answer(f"❌ Неверный формат: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка при отклонении ответа: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
 @dp.message()
 async def handle_unknown(message: types.Message):
     """Обработчик неизвестных команд и сообщений"""
@@ -1209,6 +2199,76 @@ async def handle_unknown(message: types.Message):
         except Exception as e:
             logger.error(f"Ошибка при отправке ответа пользователю: {e}")
             await message.answer(f"❌ Ошибка при отправке ответа: {e}")
+        
+        return
+    
+    # Если пользователь участвует в розыгрыше - обрабатываем ответ
+    if message.from_user.id in raffle_participants:
+        raffle_date = raffle_participants[message.from_user.id]
+        
+        # Проверяем, активен ли розыгрыш
+        if not await is_raffle_active(raffle_date):
+            await message.answer("⛔ Розыгрыш остановлен администратором. Твой ответ не может быть принят.")
+            raffle_participants.pop(message.from_user.id, None)
+            return
+        
+        # Проверяем, не истекло ли время (15 минут)
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(RaffleParticipant).where(
+                    and_(
+                        RaffleParticipant.user_id == message.from_user.id,
+                        RaffleParticipant.raffle_date == raffle_date
+                    )
+                )
+            )
+            participant = result.scalar_one_or_none()
+            
+            if not participant:
+                raffle_participants.pop(message.from_user.id, None)
+                return
+            
+            # Проверяем, не ответил ли уже
+            if participant.answer is not None:
+                await message.answer("⚠️ Ты уже ответил на вопрос. Ответ можно отправить только один раз.")
+                return
+            
+            # Проверяем время (15 минут с момента получения вопроса, используем МСК)
+            from raffle import MOSCOW_TZ
+            moscow_now = datetime.now(MOSCOW_TZ)
+            # timestamp сохраняется в UTC (без timezone), конвертируем в МСК
+            if participant.timestamp.tzinfo is None:
+                # timestamp без timezone - предполагаем что это UTC
+                timestamp_utc = participant.timestamp.replace(tzinfo=timezone.utc)
+                timestamp_moscow = timestamp_utc.astimezone(MOSCOW_TZ)
+            else:
+                # Если есть timezone, конвертируем в МСК
+                timestamp_moscow = participant.timestamp.astimezone(MOSCOW_TZ)
+            time_since_question = (moscow_now - timestamp_moscow).total_seconds() / 60
+            # Используем >= вместо > для более строгой проверки
+            if time_since_question >= RAFFLE_ANSWER_TIME:
+                await message.answer(f"⏰ Время на ответ истекло. У тебя было {RAFFLE_ANSWER_TIME} минут.")
+                raffle_participants.pop(message.from_user.id, None)
+                logger.info(
+                    f"Время истекло для пользователя {message.from_user.id}: "
+                    f"прошло {time_since_question:.2f} минут >= {RAFFLE_ANSWER_TIME} минут"
+                )
+                return
+        
+        # Сохраняем ответ
+        answer_text = message.text or (message.caption if message.caption else "")
+        if not answer_text:
+            await message.answer("❌ Отправь текстовый ответ на вопрос.")
+            return
+        
+        success = await save_user_answer(message.from_user.id, raffle_date, answer_text)
+        
+        if success:
+            await message.answer("✅ Твой ответ принят! Ожидай проверки.")
+            # Удаляем из списка ожидающих ответа (это отменит задачу проверки таймаута, если она еще не выполнилась)
+            raffle_participants.pop(message.from_user.id, None)
+        else:
+            await message.answer("❌ Произошла ошибка при сохранении ответа.")
         
         return
     
@@ -1334,6 +2394,12 @@ async def main():
     """Главная функция запуска бота"""
     try:
         await init_db()
+        # Выполняем безопасную миграцию для исправления структуры БД
+        try:
+            from safe_migrate_raffle import safe_migrate
+            await safe_migrate()
+        except Exception as e:
+            logger.warning(f"Не удалось выполнить миграцию (возможно, уже выполнена): {e}")
         # Настраиваем команды меню
         await setup_bot_commands()
         # Передаем экземпляр бота в scheduler

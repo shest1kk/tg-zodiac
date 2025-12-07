@@ -54,3 +54,8 @@ Thumbs.db
 # Docker
 .dockerignore
 
+# Markdown files (инструкции и документация)
+*.md
+
+# Markdown files (инструкции и документация)
+*.md

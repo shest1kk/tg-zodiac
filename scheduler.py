@@ -1,14 +1,18 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, date, timezone, timedelta
+from datetime import datetime, date, timezone, timedelta, time as dt_time
 from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from sqlalchemy.exc import SQLAlchemyError
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from database import AsyncSessionLocal, User
+from database import AsyncSessionLocal, User, RaffleParticipant
 from config import DAILY_HOUR, DAILY_MINUTE, ZODIAC_NAMES
+from raffle import (
+    send_raffle_announcement, send_raffle_reminder, is_raffle_date, auto_close_raffle,
+    RAFFLE_DATES, RAFFLE_HOUR, RAFFLE_MINUTE, RAFFLE_PARTICIPATION_WINDOW, RAFFLE_REMINDER_DELAY
+)
 
 # Московское время (UTC+3)
 MOSCOW_TZ = timezone(timedelta(hours=3))
@@ -271,13 +275,265 @@ def start_scheduler():
         replace_existing=True,
         timezone="UTC"
     )
+    
+    # Планировщик для розыгрышей: конкретные даты в указанное время МСК (конвертируется в UTC)
+    # Конвертируем МСК в UTC: вычитаем 3 часа
+    raffle_time_moscow = dt_time(hour=RAFFLE_HOUR, minute=RAFFLE_MINUTE)
+    # Создаем временную дату для конвертации времени
+    temp_datetime_moscow = datetime.combine(datetime(2025, 1, 1).date(), raffle_time_moscow)
+    temp_datetime_moscow = temp_datetime_moscow.replace(tzinfo=MOSCOW_TZ)
+    temp_datetime_utc = temp_datetime_moscow.astimezone(timezone.utc)
+    raffle_utc_hour = temp_datetime_utc.hour
+    raffle_utc_minute = temp_datetime_utc.minute
+    
+    # Время напоминания (через час после объявления)
+    reminder_time_moscow = dt_time(hour=(RAFFLE_HOUR + RAFFLE_REMINDER_DELAY) % 24, minute=RAFFLE_MINUTE)
+    temp_reminder_moscow = datetime.combine(datetime(2025, 1, 1).date(), reminder_time_moscow)
+    temp_reminder_moscow = temp_reminder_moscow.replace(tzinfo=MOSCOW_TZ)
+    temp_reminder_utc = temp_reminder_moscow.astimezone(timezone.utc)
+    reminder_utc_hour = temp_reminder_utc.hour
+    reminder_utc_minute = temp_reminder_utc.minute
+    
+    # Добавляем задачи для каждой конкретной даты розыгрыша
+    now_utc = datetime.now(timezone.utc)
+    
+    for raffle_date_str in RAFFLE_DATES:
+        raffle_date_obj = datetime.strptime(raffle_date_str, "%Y-%m-%d")
+        
+        # Дата и время для объявления (конвертируется из МСК в UTC)
+        announcement_datetime = datetime.combine(raffle_date_obj.date(), dt_time(hour=raffle_utc_hour, minute=raffle_utc_minute))
+        announcement_datetime = announcement_datetime.replace(tzinfo=timezone.utc)
+        
+        # Дата и время для напоминания (через час после объявления, конвертируется из МСК в UTC)
+        reminder_datetime = datetime.combine(raffle_date_obj.date(), dt_time(hour=reminder_utc_hour, minute=reminder_utc_minute))
+        reminder_datetime = reminder_datetime.replace(tzinfo=timezone.utc)
+        
+        # Проверяем, не прошло ли время для объявления
+        # Если время еще не прошло - создаем задачу
+        if announcement_datetime > now_utc:
+            scheduler.add_job(
+                send_raffle_announcements_for_date,
+                'date',
+                run_date=announcement_datetime,
+                id=f'raffle_announcements_{raffle_date_str}',
+                replace_existing=True,
+                args=[raffle_date_str]  # Передаем дату как аргумент
+            )
+            logger.info(f"✅ Задача объявления для {raffle_date_str} запланирована на {announcement_datetime.strftime('%d.%m.%Y %H:%M')} UTC ({RAFFLE_HOUR:02d}:{RAFFLE_MINUTE:02d} МСК)")
+        else:
+            # Время уже прошло - проверяем, было ли уже отправлено объявление
+            # Если объявление уже было отправлено (есть участники с announcement_time), не создаем задачу
+            logger.debug(f"⏰ Время объявления для {raffle_date_str} уже прошло ({announcement_datetime.strftime('%d.%m.%Y %H:%M')} UTC). Проверяю, было ли уже отправлено объявление...")
+            # Проверка будет выполнена в самой функции send_raffle_announcements_for_date через is_automatic=True
+            # Не создаем задачу, чтобы избежать повторных уведомлений при перезапуске бота
+            logger.info(f"⏭️ Пропускаю создание задачи для {raffle_date_str} - время уже прошло. Используйте /raffle_start для ручного запуска.")
+        
+        # Проверяем, не прошло ли время для напоминания
+        if reminder_datetime > now_utc:
+            scheduler.add_job(
+                send_raffle_reminders_for_date,
+                'date',
+                run_date=reminder_datetime,
+                id=f'raffle_reminders_{raffle_date_str}',
+                replace_existing=True,
+                args=[raffle_date_str]  # Передаем дату как аргумент
+            )
+            logger.info(f"✅ Задача напоминания для {raffle_date_str} запланирована на {reminder_datetime.strftime('%d.%m.%Y %H:%M')} UTC")
+        else:
+            logger.debug(f"⏰ Время напоминания для {raffle_date_str} уже прошло. Задача не будет создана.")
+        
+        # Автоматическое закрытие розыгрыша в 23:59 его даты
+        close_time_moscow = dt_time(hour=23, minute=59)
+        temp_close_moscow = datetime.combine(raffle_date_obj.date(), close_time_moscow)
+        temp_close_moscow = temp_close_moscow.replace(tzinfo=MOSCOW_TZ)
+        temp_close_utc = temp_close_moscow.astimezone(timezone.utc)
+        close_utc_hour = temp_close_utc.hour
+        close_utc_minute = temp_close_utc.minute
+        
+        close_datetime = datetime.combine(raffle_date_obj.date(), dt_time(hour=close_utc_hour, minute=close_utc_minute))
+        close_datetime = close_datetime.replace(tzinfo=timezone.utc)
+        
+        # Проверяем, не прошло ли время для закрытия
+        if close_datetime > now_utc:
+            scheduler.add_job(
+                close_raffle_automatically,
+                'date',
+                run_date=close_datetime,
+                id=f'raffle_close_{raffle_date_str}',
+                replace_existing=True,
+                args=[raffle_date_str]  # Передаем дату как аргумент
+            )
+            logger.info(f"✅ Задача закрытия для {raffle_date_str} запланирована на {close_datetime.strftime('%d.%m.%Y %H:%M')} UTC (23:59 МСК)")
+        else:
+            logger.debug(f"⏰ Время закрытия для {raffle_date_str} уже прошло. Задача не будет создана.")
+    
     scheduler.start()
     
     logger.info(
         f"📅 Планировщик запущен.\n"
         f"   Рассылка: каждый день в {DAILY_HOUR:02d}:{DAILY_MINUTE:02d} МСК ({utc_hour:02d}:{DAILY_MINUTE:02d} UTC)\n"
-        f"   Период: с 01.12.2025 по 31.12.2025 (31 день)"
+        f"   Период: с 01.12.2025 по 31.12.2025 (31 день)\n"
+        f"   🎁 Розыгрыши: в {RAFFLE_HOUR:02d}:{RAFFLE_MINUTE:02d} МСК ({raffle_utc_hour:02d}:{raffle_utc_minute:02d} UTC)\n"
+        f"   Даты: {', '.join(RAFFLE_DATES)}"
     )
+
+async def send_raffle_announcements_for_date(raffle_date: str):
+    """Рассылка объявлений о розыгрыше для конкретной даты
+    
+    Args:
+        raffle_date: Дата розыгрыша в формате YYYY-MM-DD
+    """
+    if bot is None:
+        logger.error("Бот не инициализирован в scheduler!")
+        return
+    
+    try:
+        # Проверяем, является ли указанная дата датой розыгрыша
+        if not is_raffle_date(raffle_date):
+            logger.debug(f"Дата {raffle_date} не является датой розыгрыша")
+            return
+        
+        # Проверяем, было ли уже отправлено объявление для этой даты
+        # Если время уже прошло и объявления были отправлены, не отправляем повторно
+        moscow_now = datetime.now(MOSCOW_TZ)
+        raffle_date_obj = datetime.strptime(raffle_date, "%Y-%m-%d").date()
+        announcement_moscow = datetime.combine(raffle_date_obj, dt_time(hour=RAFFLE_HOUR, minute=RAFFLE_MINUTE))
+        announcement_moscow = announcement_moscow.replace(tzinfo=MOSCOW_TZ)
+        
+        # Если время объявления уже прошло, проверяем, были ли уже отправлены объявления
+        if announcement_moscow < moscow_now:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(RaffleParticipant).where(
+                        and_(
+                            RaffleParticipant.raffle_date == raffle_date,
+                            RaffleParticipant.announcement_time.isnot(None)
+                        )
+                    ).limit(1)
+                )
+                existing = result.scalar_one_or_none()
+                
+                if existing:
+                    logger.info(f"⏭️ Объявления для розыгрыша {raffle_date} уже были отправлены ранее. Пропускаю повторную отправку.")
+                    return
+        
+        logger.info(f"🎁 Начинаю рассылку объявлений о розыгрыше ({raffle_date})")
+        
+        # Получаем всех подписанных пользователей
+        try:
+            users = await _get_subscribed_users()
+        except Exception as e:
+            logger.error(f"Ошибка при получении пользователей для розыгрыша: {e}")
+            return
+        
+        if not users:
+            logger.info("Нет подписанных пользователей для розыгрыша")
+            return
+        
+        success_count = 0
+        error_count = 0
+        
+        for user in users:
+            # Автоматический запуск всегда отправляет объявления в запланированное время
+            message_id = await send_raffle_announcement(bot, user.id, raffle_date, force_send=False, is_automatic=True)
+            if message_id:
+                success_count += 1
+                await asyncio.sleep(RATE_LIMIT_DELAY)
+            else:
+                error_count += 1
+        
+        logger.info(
+            f"Рассылка объявлений о розыгрыше завершена. "
+            f"Обработано: {success_count}, Ошибок: {error_count}, "
+            f"Всего пользователей: {len(users)}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при рассылке объявлений о розыгрыше: {e}", exc_info=True)
+
+
+async def close_raffle_automatically(raffle_date: str):
+    """Автоматическое закрытие розыгрыша в 23:59 его даты"""
+    if bot is None:
+        logger.error("Бот не инициализирован в scheduler!")
+        return
+    
+    try:
+        moscow_now = datetime.now(MOSCOW_TZ)
+        current_date_str = moscow_now.strftime("%Y-%m-%d")
+        
+        # Проверяем, что это правильная дата
+        if raffle_date != current_date_str:
+            logger.debug(f"Дата розыгрыша {raffle_date} не совпадает с текущей датой {current_date_str}")
+            return
+        
+        logger.info(f"🕐 Автоматически закрываю розыгрыш {raffle_date} в 23:59")
+        
+        success = await auto_close_raffle(raffle_date)
+        if success:
+            logger.info(f"✅ Розыгрыш {raffle_date} успешно закрыт автоматически")
+        else:
+            logger.warning(f"⚠️ Не удалось закрыть розыгрыш {raffle_date}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при автоматическом закрытии розыгрыша {raffle_date}: {e}", exc_info=True)
+
+
+async def send_raffle_reminders_for_date(raffle_date: str):
+    """Отправка напоминаний о розыгрыше для конкретной даты
+    
+    Args:
+        raffle_date: Дата розыгрыша в формате YYYY-MM-DD
+    """
+    if bot is None:
+        logger.error("Бот не инициализирован в scheduler!")
+        return
+    
+    try:
+        # Проверяем, является ли указанная дата датой розыгрыша
+        if not is_raffle_date(raffle_date):
+            logger.debug(f"Дата {raffle_date} не является датой розыгрыша")
+            return
+        
+        logger.info(f"⏰ Отправляю напоминания о розыгрыше ({raffle_date})")
+        
+        # Получаем всех подписанных пользователей
+        try:
+            users = await _get_subscribed_users()
+        except Exception as e:
+            logger.error(f"Ошибка при получении пользователей для напоминаний: {e}")
+            return
+        
+        if not users:
+            return
+        
+        # Проверяем, кто еще не участвовал (не нажал кнопку)
+        # Участник - это тот, у кого question_id != 0 (нажал кнопку и получил вопрос)
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(RaffleParticipant).where(
+                    and_(
+                        RaffleParticipant.raffle_date == raffle_date,
+                        RaffleParticipant.question_id != 0  # Участвовал (получил вопрос, нажал кнопку)
+                    )
+                )
+            )
+            participants = result.scalars().all()
+            participant_ids = {p.user_id for p in participants}
+        
+        # Отправляем напоминания тем, кто не участвовал
+        success_count = 0
+        for user in users:
+            if user.id not in participant_ids:
+                await send_raffle_reminder(bot, user.id, raffle_date)
+                success_count += 1
+                await asyncio.sleep(RATE_LIMIT_DELAY)
+        
+        logger.info(f"Напоминания отправлены {success_count} пользователям")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отправке напоминаний о розыгрыше: {e}", exc_info=True)
+
 
 def stop_scheduler():
     """Остановка планировщика"""
