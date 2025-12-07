@@ -263,14 +263,19 @@ def start_scheduler():
     # 09:00 МСК (UTC+3) = 06:00 UTC
     scheduler = AsyncIOScheduler(timezone="UTC")
     
-    # Конвертируем московское время в UTC: вычитаем 3 часа
-    utc_hour = (DAILY_HOUR - 3) % 24
+    # Конвертируем московское время в UTC через timezone (надежнее, чем простое вычитание)
+    daily_time_moscow = dt_time(hour=DAILY_HOUR, minute=DAILY_MINUTE)
+    temp_daily_moscow = datetime.combine(datetime(2025, 1, 1).date(), daily_time_moscow)
+    temp_daily_moscow = temp_daily_moscow.replace(tzinfo=MOSCOW_TZ)
+    temp_daily_utc = temp_daily_moscow.astimezone(timezone.utc)
+    daily_utc_hour = temp_daily_utc.hour
+    daily_utc_minute = temp_daily_utc.minute
     
     scheduler.add_job(
         send_daily,
         'cron',
-        hour=utc_hour,
-        minute=DAILY_MINUTE,
+        hour=daily_utc_hour,
+        minute=daily_utc_minute,
         id='daily_zodiac',
         replace_existing=True,
         timezone="UTC"
@@ -371,7 +376,7 @@ def start_scheduler():
     
     logger.info(
         f"📅 Планировщик запущен.\n"
-        f"   Рассылка: каждый день в {DAILY_HOUR:02d}:{DAILY_MINUTE:02d} МСК ({utc_hour:02d}:{DAILY_MINUTE:02d} UTC)\n"
+        f"   Рассылка: каждый день в {DAILY_HOUR:02d}:{DAILY_MINUTE:02d} МСК ({daily_utc_hour:02d}:{daily_utc_minute:02d} UTC)\n"
         f"   Период: с 01.12.2025 по 31.12.2025 (31 день)\n"
         f"   🎁 Розыгрыши: в {RAFFLE_HOUR:02d}:{RAFFLE_MINUTE:02d} МСК ({raffle_utc_hour:02d}:{raffle_utc_minute:02d} UTC)\n"
         f"   Даты: {', '.join(RAFFLE_DATES)}"
