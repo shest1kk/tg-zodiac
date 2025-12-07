@@ -219,6 +219,32 @@ def update_question(question_id: int, raffle_date: str, title: str, text: str) -
     return False
 
 
+async def has_raffle_started(raffle_date: str) -> bool:
+    """Проверяет, начался ли розыгрыш (были ли отправлены объявления)
+    
+    Args:
+        raffle_date: Дата розыгрыша в формате YYYY-MM-DD
+        
+    Returns:
+        True если розыгрыш начался (есть участники с announcement_time), False иначе
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(RaffleParticipant).where(
+                    and_(
+                        RaffleParticipant.raffle_date == raffle_date,
+                        RaffleParticipant.announcement_time.isnot(None)
+                    )
+                ).limit(1)
+            )
+            participant = result.scalar_one_or_none()
+            return participant is not None
+    except Exception as e:
+        logger.error(f"Ошибка при проверке начала розыгрыша {raffle_date}: {e}")
+        return False  # В случае ошибки разрешаем редактирование
+
+
 def is_raffle_date(date_str: Optional[str] = None) -> bool:
     """Проверяет, является ли дата датой розыгрыша"""
     if date_str is None:

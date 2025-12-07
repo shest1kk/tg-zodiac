@@ -16,7 +16,7 @@ from raffle import (
     get_all_questions, get_question_by_id, update_question, get_all_raffle_dates,
     is_raffle_date, RAFFLE_ANSWER_TIME, RAFFLE_PARTICIPATION_WINDOW,
     create_or_get_raffle, stop_raffle, is_raffle_active,
-    get_raffle_by_date, get_last_active_raffle
+    get_raffle_by_date, get_last_active_raffle, has_raffle_started
 )
 
 bot = Bot(TG_TOKEN)
@@ -1181,9 +1181,13 @@ async def admin_edit_questions_menu(cb: types.CallbackQuery):
             except:
                 date_display = raffle_date
             
+            # Проверяем, начался ли розыгрыш (асинхронно)
+            raffle_started = await has_raffle_started(raffle_date)
+            status_icon = "⛔" if raffle_started else "📅"
+            
             buttons.append([
                 types.InlineKeyboardButton(
-                    text=f"📅 {date_display}",
+                    text=f"{status_icon} {date_display}" + (" (начат)" if raffle_started else ""),
                     callback_data=f"admin_questions_date_{raffle_date}"
                 )
             ])
@@ -1227,15 +1231,24 @@ async def admin_questions_date_menu(cb: types.CallbackQuery):
         except:
             date_display = raffle_date
         
-        text = f"❓ <b>Вопросы для {date_display}</b>\n\nВыбери вопрос для редактирования:\n\n"
+        # Проверяем, начался ли розыгрыш
+        raffle_started = await has_raffle_started(raffle_date)
+        
+        text = f"❓ <b>Вопросы для {date_display}</b>\n\n"
+        
+        if raffle_started:
+            text += "⛔ <b>Розыгрыш уже начался!</b> Редактирование недоступно.\n\n"
+        
+        text += "Выбери вопрос для просмотра:\n\n"
         
         buttons = []
         for question in questions:
             question_id = question.get('id')
             question_title = question.get('title', f'Вопрос #{question_id}')
+            icon = "🔒" if raffle_started else "❓"
             buttons.append([
                 types.InlineKeyboardButton(
-                    text=f"❓ {question_title}",
+                    text=f"{icon} {question_title}",
                     callback_data=f"admin_question_edit_{raffle_date}_{question_id}"
                 )
             ])
@@ -1283,16 +1296,31 @@ async def admin_question_edit(cb: types.CallbackQuery):
         except:
             date_display = raffle_date
         
+        # Проверяем, начался ли розыгрыш
+        raffle_started = await has_raffle_started(raffle_date)
+        
         text = (
             f"❓ <b>Вопрос #{question_id}</b>\n"
             f"📅 Дата: {date_display}\n\n"
+        )
+        
+        if raffle_started:
+            text += "⛔ <b>Розыгрыш уже начался!</b> Редактирование недоступно.\n\n"
+        
+        text += (
             f"<b>Название:</b> {question.get('title', '')}\n"
             f"<b>Текст:</b> {question.get('text', '')}\n\n"
-            f"Для редактирования отправь команду:\n"
-            f"<code>/edit_question {raffle_date} {question_id} Название | Текст вопроса</code>\n\n"
-            f"Пример:\n"
-            f"<code>/edit_question {raffle_date} {question_id} Забота о гостях | Назови ключевые слова, описывающие ценность 'забота о гостях'</code>"
         )
+        
+        if not raffle_started:
+            text += (
+                f"Для редактирования отправь команду:\n"
+                f"<code>/edit_question {raffle_date} {question_id} Название | Текст вопроса</code>\n\n"
+                f"Пример:\n"
+                f"<code>/edit_question {raffle_date} {question_id} Забота о гостях | Назови ключевые слова, описывающие ценность 'забота о гостях'</code>"
+            )
+        else:
+            text += "⚠️ Вопросы можно редактировать только до начала розыгрыша."
         
         buttons = [
             [types.InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"admin_questions_date_{raffle_date}")]
@@ -1338,6 +1366,23 @@ async def cmd_edit_question(message: types.Message):
         
         if not title or not text:
             await message.answer("❌ Название и текст вопроса не могут быть пустыми")
+            return
+        
+        # Проверяем, начался ли розыгрыш
+        raffle_started = await has_raffle_started(raffle_date)
+        if raffle_started:
+            try:
+                date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = raffle_date
+            
+            await message.answer(
+                f"⛔ <b>Невозможно редактировать вопрос!</b>\n\n"
+                f"Розыгрыш на {date_display} уже начался (объявления были отправлены пользователям).\n\n"
+                f"Вопросы можно редактировать только до начала розыгрыша.",
+                parse_mode="HTML"
+            )
             return
         
         # Проверяем, существует ли вопрос
@@ -1680,51 +1725,48 @@ async def raffle_join_callback(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data == "admin_raffle")
 async def admin_raffle_menu(cb: types.CallbackQuery):
-    """Меню админ-панели для розыгрышей - список дат"""
+    """Меню админ-панели для розыгрышей - список всех возможных дат"""
     if not is_admin(cb.from_user.id):
         await cb.answer("Доступ запрещен", show_alert=True)
         return
     
     try:
-        # Получаем все розыгрыши из базы данных
+        from raffle import RAFFLE_DATES
+        
+        # Получаем все розыгрыши из базы данных для проверки статуса
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(Raffle).order_by(Raffle.raffle_number.desc())
+                select(Raffle)
             )
-            raffles = result.scalars().all()
-        
-        if not raffles:
-            text = "🎁 <b>Розыгрыш</b>\n\nРозыгрышей пока нет."
-            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")]]
-            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
-            await cb.answer()
-            return
+            raffles_db = {r.raffle_date: r for r in result.scalars().all()}
         
         text = "🎁 <b>Розыгрыш</b>\n\nВыбери дату розыгрыша:\n\n"
         
         buttons = []
-        for raffle in raffles:
-            # Форматируем дату для отображения (07.12.2025 -> 07.12)
+        for raffle_date in RAFFLE_DATES:
+            # Форматируем дату для отображения
             try:
-                date_obj = datetime.strptime(raffle.raffle_date, "%Y-%m-%d")
+                date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
                 date_display = date_obj.strftime("%d.%m")
             except:
-                date_display = raffle.raffle_date
+                date_display = raffle_date
             
-            # Проверяем активность с учетом времени закрытия
-            is_active = await is_raffle_active(raffle.raffle_date)
-            status_icon = "🟢" if is_active else "🔴"
-            button_text = f"{status_icon} Розыгрыш №{raffle.raffle_number} от {date_display}"
+            # Проверяем, есть ли розыгрыш в БД
+            raffle = raffles_db.get(raffle_date)
+            if raffle:
+                # Проверяем активность с учетом времени закрытия
+                is_active = await is_raffle_active(raffle_date)
+                status_icon = "🟢" if is_active else "🔴"
+                button_text = f"{status_icon} Розыгрыш №{raffle.raffle_number} от {date_display}"
+            else:
+                # Розыгрыш еще не создан
+                status_icon = "⚪"
+                button_text = f"{status_icon} {date_display} (не создан)"
+            
             buttons.append([types.InlineKeyboardButton(
                 text=button_text,
-                callback_data=f"admin_raffle_date_{raffle.raffle_date}"
+                callback_data=f"admin_raffle_date_{raffle_date}"
             )])
-        
-        # Добавляем кнопку редактирования вопросов
-        buttons.append([types.InlineKeyboardButton(
-            text="❓ Редактировать вопросы",
-            callback_data="admin_edit_questions"
-        )])
         
         buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")])
         
@@ -1737,7 +1779,7 @@ async def admin_raffle_menu(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("admin_raffle_date_"))
 async def admin_raffle_date_menu(cb: types.CallbackQuery):
-    """Меню вопросов для конкретной даты розыгрыша"""
+    """Меню для конкретной даты розыгрыша - вопросы и управление"""
     if not is_admin(cb.from_user.id):
         await cb.answer("Доступ запрещен", show_alert=True)
         return
@@ -1745,20 +1787,11 @@ async def admin_raffle_date_menu(cb: types.CallbackQuery):
     try:
         raffle_date = cb.data.split("_")[-1]
         
-        # Получаем информацию о розыгрыше
+        # Получаем информацию о розыгрыше (может быть None, если еще не создан)
         raffle = await get_raffle_by_date(raffle_date)
-        if not raffle:
-            await cb.answer("Розыгрыш не найден", show_alert=True)
-            return
         
         # Получаем все вопросы для этой даты
         questions = get_all_questions(raffle_date)
-        if not questions:
-            text = f"🎁 <b>Розыгрыш от {raffle_date}</b>\n\nВопросы не найдены."
-            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_raffle")]]
-            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
-            await cb.answer()
-            return
         
         # Форматируем дату для отображения
         try:
@@ -1767,26 +1800,64 @@ async def admin_raffle_date_menu(cb: types.CallbackQuery):
         except:
             date_display = raffle_date
         
-        status = "🟢 Активен" if raffle.is_active else "🔴 Остановлен"
-        text = (
-            f"🎁 <b>Розыгрыш от {date_display}</b>\n"
-            f"#{raffle.raffle_number} | {status}\n\n"
-            f"Выбери вопрос для просмотра участников:"
-        )
+        # Формируем текст
+        if raffle:
+            is_active = await is_raffle_active(raffle_date)
+            status = "🟢 Активен" if is_active else "🔴 Остановлен"
+            text = (
+                f"🎁 <b>Розыгрыш от {date_display}</b>\n"
+                f"#{raffle.raffle_number} | {status}\n\n"
+            )
+        else:
+            text = (
+                f"🎁 <b>Розыгрыш от {date_display}</b>\n"
+                f"⚪ Розыгрыш еще не создан\n\n"
+            )
+        
+        # Проверяем, начался ли розыгрыш
+        raffle_started = await has_raffle_started(raffle_date)
+        
+        if questions:
+            if raffle and not raffle_started:
+                text += "Выбери действие:\n\n"
+            elif raffle:
+                text += "Выбери вопрос для просмотра участников:\n\n"
+            else:
+                text += "Вопросы для этого розыгрыша:\n\n"
+        else:
+            text += "Вопросы не найдены.\n\n"
         
         buttons = []
-        for question in questions:
-            buttons.append([types.InlineKeyboardButton(
-                text=question["title"],
-                callback_data=f"admin_raffle_question_{raffle_date}_{question['id']}"
-            )])
         
-        # Добавляем кнопку остановки, если розыгрыш активен
-        if raffle.is_active:
-            buttons.append([types.InlineKeyboardButton(
-                text="⛔ Остановить розыгрыш",
-                callback_data=f"admin_raffle_stop_{raffle_date}"
-            )])
+        # Если розыгрыш создан и начался - показываем вопросы для просмотра участников
+        if raffle and raffle_started:
+            for question in questions:
+                buttons.append([types.InlineKeyboardButton(
+                    text=f"❓ {question['title']}",
+                    callback_data=f"admin_raffle_question_{raffle_date}_{question['id']}"
+                )])
+        # Если розыгрыш создан, но не начался - показываем вопросы для редактирования
+        elif raffle and not raffle_started:
+            for question in questions:
+                buttons.append([types.InlineKeyboardButton(
+                    text=f"❓ {question['title']}",
+                    callback_data=f"admin_question_edit_{raffle_date}_{question['id']}"
+                )])
+        # Если розыгрыш не создан - показываем вопросы для редактирования
+        else:
+            for question in questions:
+                buttons.append([types.InlineKeyboardButton(
+                    text=f"❓ {question['title']}",
+                    callback_data=f"admin_question_edit_{raffle_date}_{question['id']}"
+                )])
+        
+        # Добавляем кнопку редактирования вопросов (всегда доступна)
+        buttons.append([types.InlineKeyboardButton(
+            text="✏️ Редактировать вопросы",
+            callback_data=f"admin_questions_date_{raffle_date}"
+        )])
+        
+        # Кнопка остановки убрана - доступна только через команду /raffle_stop
         
         buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_raffle")])
         
@@ -1907,9 +1978,28 @@ async def admin_raffle_results(cb: types.CallbackQuery):
         text = f"📊 <b>Результаты: {question['title']}</b>\n\n"
         
         if answered:
+            # Получаем информацию о пользователях из базы данных
+            user_ids = [p.user_id for p in answered]
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(User).where(User.id.in_(user_ids))
+                )
+                users = {u.id: u for u in result.scalars().all()}
+            
             for p in answered:
                 status_icon = "✅" if p.is_correct is True else ("❌" if p.is_correct is False else "⏳")
-                text += f"{status_icon} <b>ID: {p.user_id}</b>\n"
+                user = users.get(p.user_id)
+                username = f"@{user.username}" if user and user.username else ""
+                first_name = user.first_name if user and user.first_name else ""
+                
+                # Формируем строку с информацией о пользователе
+                user_info = f"<b>ID: {p.user_id}</b>"
+                if username:
+                    user_info += f" {username}"
+                if first_name:
+                    user_info += f" ({first_name})"
+                
+                text += f"{status_icon} {user_info}\n"
                 text += f"Ответ: {p.answer}\n"
                 text += f"Время: {p.timestamp.strftime('%d.%m.%Y %H:%M')}\n\n"
         else:
