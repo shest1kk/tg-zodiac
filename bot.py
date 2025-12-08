@@ -18,7 +18,7 @@ from raffle import (
     is_raffle_date, RAFFLE_ANSWER_TIME, RAFFLE_PARTICIPATION_WINDOW,
     create_or_get_raffle, stop_raffle, is_raffle_active,
     get_raffle_by_date, get_last_active_raffle, has_raffle_started, RAFFLE_DATES,
-    get_unchecked_answers
+    get_unchecked_answers, get_users_for_reminder
 )
 
 bot = Bot(TG_TOKEN)
@@ -1955,23 +1955,19 @@ async def admin_raffle_date_menu(cb: types.CallbackQuery):
             callback_data=f"admin_questions_date_{raffle_date}"
         )])
         
-        # Добавляем кнопку для просмотра непроверенных ответов (всегда показываем)
+        # Добавляем кнопку для отправки напоминания тем, кто не ответил за 15 минут
         try:
-            unchecked = await get_unchecked_answers(raffle_date)
-            unchecked_count = len(unchecked)
-            logger.debug(f"Непроверенные ответы для {raffle_date}: {unchecked_count}")
+            users_for_reminder = await get_users_for_reminder(raffle_date)
+            reminder_count = len(users_for_reminder)
+            logger.debug(f"Пользователей для напоминания для {raffle_date}: {reminder_count}")
             
-            buttons.append([types.InlineKeyboardButton(
-                text=f"⏳ Непроверенные ответы ({unchecked_count})",
-                callback_data=f"admin_unchecked_{raffle_date}"
-            )])
+            if reminder_count > 0:
+                buttons.append([types.InlineKeyboardButton(
+                    text=f"📨 Направить напоминание ({reminder_count})",
+                    callback_data=f"admin_send_reminder_all_{raffle_date}"
+                )])
         except Exception as e:
-            logger.error(f"Ошибка при получении непроверенных ответов для {raffle_date}: {e}", exc_info=True)
-            # Показываем кнопку даже при ошибке
-            buttons.append([types.InlineKeyboardButton(
-                text="⏳ Непроверенные ответы",
-                callback_data=f"admin_unchecked_{raffle_date}"
-            )])
+            logger.error(f"Ошибка при получении списка пользователей для напоминания для {raffle_date}: {e}", exc_info=True)
         
         # Кнопка остановки убрана - доступна только через команду /raffle_stop
         
@@ -2154,9 +2150,81 @@ async def admin_raffle_results(cb: types.CallbackQuery):
         await cb.answer("Ошибка", show_alert=True)
 
 
+@dp.callback_query(F.data.startswith("admin_send_reminder_all_"))
+async def admin_send_reminder_all(cb: types.CallbackQuery):
+    """Отправка напоминания всем, кто не ответил за 15 минут для всей даты розыгрыша"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        raffle_date = cb.data.split("_")[-1]
+        
+        # Получаем список пользователей, которым нужно отправить напоминание
+        users_for_reminder = await get_users_for_reminder(raffle_date)
+        
+        if not users_for_reminder:
+            await cb.answer("Нет пользователей, которым нужно отправить напоминание", show_alert=True)
+            return
+        
+        # Текст напоминания
+        reminder_text = (
+            "⏰ От тебя не поступил ответ на задание.\n\n"
+            "Ждем тебя на следующем задании! 💫"
+        )
+        
+        # Отправляем напоминания
+        sent_count = 0
+        blocked_count = 0
+        error_count = 0
+        
+        await cb.answer("Отправка напоминаний...", show_alert=False)
+        
+        for participant in users_for_reminder:
+            success = await safe_send_message(bot, participant.user_id, reminder_text)
+            if success:
+                sent_count += 1
+            else:
+                # Проверяем, заблокирован ли бот
+                try:
+                    await bot.send_chat_action(participant.user_id, "typing")
+                    error_count += 1
+                except TelegramForbiddenError:
+                    blocked_count += 1
+                except Exception:
+                    error_count += 1
+            
+            # Небольшая задержка между отправками
+            await asyncio.sleep(RATE_LIMIT_DELAY)
+        
+        # Формируем отчет для админа
+        try:
+            date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = raffle_date
+        
+        report_text = (
+            f"📨 <b>Напоминания отправлены для {date_display}</b>\n\n"
+            f"✅ Отправлено: {sent_count}\n"
+        )
+        
+        if blocked_count > 0:
+            report_text += f"🚫 Заблокировали бота: {blocked_count}\n"
+        
+        if error_count > 0:
+            report_text += f"❌ Ошибок: {error_count}\n"
+        
+        await cb.message.answer(report_text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отправке напоминаний: {e}", exc_info=True)
+        await cb.answer("Ошибка при отправке", show_alert=True)
+
+
 @dp.callback_query(F.data.startswith("admin_send_reminder_"))
 async def admin_send_reminder(cb: types.CallbackQuery):
-    """Отправка напоминания тем, кто не ответил на вопрос"""
+    """Отправка напоминания тем, кто не ответил на вопрос (для конкретного вопроса)"""
     if not is_admin(cb.from_user.id):
         await cb.answer("Доступ запрещен", show_alert=True)
         return
@@ -2236,12 +2304,45 @@ async def admin_unchecked_answers(cb: types.CallbackQuery):
         return
     
     try:
-        raffle_date = cb.data.split("_")[-1]
+        # Парсим callback_data: admin_unchecked_{raffle_date} или admin_unchecked_{raffle_date}_{index}
+        # Формат: admin_unchecked_2025-12-08 или admin_unchecked_2025-12-08_1
+        data_parts = cb.data.split("_", 2)  # Разделяем только первые 2 раза
+        if len(data_parts) < 3:
+            await cb.answer("Ошибка формата данных", show_alert=True)
+            return
+        
+        # data_parts[2] содержит либо "2025-12-08", либо "2025-12-08_1"
+        remaining = data_parts[2]
+        if "_" in remaining:
+            # Есть индекс
+            raffle_date, index_str = remaining.rsplit("_", 1)
+            try:
+                current_index = int(index_str)
+            except ValueError:
+                current_index = 0
+        else:
+            # Нет индекса, начинаем с 0
+            raffle_date = remaining
+            current_index = 0
         
         # Получаем непроверенные ответы
         unchecked = await get_unchecked_answers(raffle_date)
         
         if not unchecked:
+            try:
+                date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = raffle_date
+            
+            text = f"⏳ <b>Непроверенные ответы для {date_display}</b>\n\n✅ Все ответы проверены!"
+            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_raffle_date_{raffle_date}")]]
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+            await cb.answer()
+            return
+        
+        # Проверяем, не вышли ли за пределы списка
+        if current_index >= len(unchecked):
             try:
                 date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
                 date_display = date_obj.strftime("%d.%m.%Y")
@@ -2262,8 +2363,8 @@ async def admin_unchecked_answers(cb: types.CallbackQuery):
             )
             users = {u.id: u for u in result.scalars().all()}
         
-        # Показываем первый непроверенный ответ
-        participant = unchecked[0]
+        # Показываем участника по текущему индексу
+        participant = unchecked[current_index]
         user = users.get(participant.user_id)
         username = f"@{user.username}" if user and user.username else ""
         first_name = user.first_name if user and user.first_name else ""
@@ -2325,7 +2426,7 @@ async def admin_unchecked_answers(cb: types.CallbackQuery):
                 f"⏰ <b>Время получения вопроса:</b> {participant.timestamp.strftime('%d.%m.%Y %H:%M')}\n\n"
             )
         
-        text += f"📊 Осталось непроверенных: {len(unchecked)}"
+        text += f"📊 Осталось непроверенных: {len(unchecked) - current_index - 1}"
         
         buttons = []
         
@@ -2342,17 +2443,27 @@ async def admin_unchecked_answers(cb: types.CallbackQuery):
                 )
             ])
         else:
-            # Если пользователь не ответил, показываем только кнопку "Пропустить"
-            buttons.append([
-                types.InlineKeyboardButton(
-                    text="⏭️ Пропустить (не ответил)",
-                    callback_data=f"admin_unchecked_{raffle_date}"
-                )
-            ])
+            # Если пользователь не ответил, показываем кнопку "Пропустить" с индексом следующего участника
+            next_index = current_index + 1
+            if next_index < len(unchecked):
+                buttons.append([
+                    types.InlineKeyboardButton(
+                        text="⏭️ Пропустить (не ответил)",
+                        callback_data=f"admin_unchecked_{raffle_date}_{next_index}"
+                    )
+                ])
+            else:
+                # Если это последний участник, показываем кнопку "Назад"
+                pass
         
         buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_raffle_date_{raffle_date}")])
         
-        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        try:
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        except Exception as e:
+            # Игнорируем ошибку "message is not modified"
+            if "message is not modified" not in str(e).lower():
+                raise
         await cb.answer()
         
     except Exception as e:

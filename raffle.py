@@ -896,6 +896,40 @@ async def get_unchecked_answers(raffle_date: str) -> List[RaffleParticipant]:
         return []
 
 
+async def get_users_for_reminder(raffle_date: str) -> List[RaffleParticipant]:
+    """Получает список пользователей, которым нужно отправить напоминание
+    
+    Критерии:
+    - Приняли участие в розыгрыше (question_id != 0)
+    - Не ответили на вопрос (answer is None)
+    - Прошло более 15 минут с момента получения вопроса
+    
+    Returns:
+        Список участников, которым нужно отправить напоминание
+    """
+    try:
+        # Получаем текущее время в МСК и преобразуем в UTC (naive) для сравнения с timestamp в БД
+        current_time_moscow = datetime.now(MOSCOW_TZ)
+        current_time_utc = current_time_moscow.astimezone(timezone.utc).replace(tzinfo=None)
+        timeout_threshold = current_time_utc - timedelta(minutes=RAFFLE_ANSWER_TIME)
+        
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(RaffleParticipant).where(
+                    and_(
+                        RaffleParticipant.raffle_date == raffle_date,
+                        RaffleParticipant.question_id != 0,  # Только те, кто получил вопрос
+                        RaffleParticipant.answer.is_(None),  # Не ответили
+                        RaffleParticipant.timestamp <= timeout_threshold  # Прошло более 15 минут
+                    )
+                ).order_by(RaffleParticipant.timestamp.asc())
+            )
+            return list(result.scalars().all())
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка пользователей для напоминания: {e}")
+        return []
+
+
 async def approve_answer(user_id: int, raffle_date: str) -> bool:
     """Принимает ответ пользователя"""
     try:
