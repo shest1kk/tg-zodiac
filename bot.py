@@ -16,7 +16,8 @@ from raffle import (
     get_all_questions, get_question_by_id, update_question, get_all_raffle_dates,
     is_raffle_date, RAFFLE_ANSWER_TIME, RAFFLE_PARTICIPATION_WINDOW,
     create_or_get_raffle, stop_raffle, is_raffle_active,
-    get_raffle_by_date, get_last_active_raffle, has_raffle_started, RAFFLE_DATES
+    get_raffle_by_date, get_last_active_raffle, has_raffle_started, RAFFLE_DATES,
+    get_unchecked_answers
 )
 
 bot = Bot(TG_TOKEN)
@@ -1953,6 +1954,26 @@ async def admin_raffle_date_menu(cb: types.CallbackQuery):
             callback_data=f"admin_questions_date_{raffle_date}"
         )])
         
+        # Добавляем кнопку для просмотра непроверенных ответов
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(RaffleParticipant).where(
+                    and_(
+                        RaffleParticipant.raffle_date == raffle_date,
+                        RaffleParticipant.answer.isnot(None),
+                        RaffleParticipant.is_correct.is_(None)
+                    )
+                )
+            )
+            unchecked = result.scalars().all()
+            unchecked_count = len(unchecked)
+        
+        if unchecked_count > 0:
+            buttons.append([types.InlineKeyboardButton(
+                text=f"⏳ Непроверенные ответы ({unchecked_count})",
+                callback_data=f"admin_unchecked_{raffle_date}"
+            )])
+        
         # Кнопка остановки убрана - доступна только через команду /raffle_stop
         
         buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_raffle")])
@@ -2113,6 +2134,95 @@ async def admin_raffle_results(cb: types.CallbackQuery):
         logger.error(f"Ошибка при просмотре результатов: {e}")
         await cb.answer("Ошибка", show_alert=True)
 
+@dp.callback_query(F.data.startswith("admin_unchecked_"))
+async def admin_unchecked_answers(cb: types.CallbackQuery):
+    """Просмотр непроверенных ответов для даты розыгрыша"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        raffle_date = cb.data.split("_")[-1]
+        
+        # Получаем непроверенные ответы
+        unchecked = await get_unchecked_answers(raffle_date)
+        
+        if not unchecked:
+            try:
+                date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = raffle_date
+            
+            text = f"⏳ <b>Непроверенные ответы для {date_display}</b>\n\n✅ Все ответы проверены!"
+            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_raffle_date_{raffle_date}")]]
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+            await cb.answer()
+            return
+        
+        # Получаем информацию о пользователях
+        user_ids = [p.user_id for p in unchecked]
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User).where(User.id.in_(user_ids))
+            )
+            users = {u.id: u for u in result.scalars().all()}
+        
+        # Показываем первый непроверенный ответ
+        participant = unchecked[0]
+        user = users.get(participant.user_id)
+        username = f"@{user.username}" if user and user.username else ""
+        first_name = user.first_name if user and user.first_name else ""
+        
+        # Получаем вопрос
+        question = get_question_by_id(participant.question_id, raffle_date)
+        question_title = question.get('title', 'Вопрос') if question else 'Вопрос'
+        question_text = question.get('text', '') if question else ''
+        
+        try:
+            date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = raffle_date
+        
+        # Формируем информацию о пользователе
+        user_info = f"<b>ID: {participant.user_id}</b>"
+        if username:
+            user_info += f" {username}"
+        if first_name:
+            user_info += f" ({first_name})"
+        
+        text = (
+            f"⏳ <b>Непроверенные ответы для {date_display}</b>\n\n"
+            f"📋 <b>Вопрос:</b> {question_title}\n"
+            f"{question_text}\n\n"
+            f"👤 <b>Пользователь:</b> {user_info}\n"
+            f"💬 <b>Ответ:</b> {participant.answer}\n"
+            f"⏰ <b>Время ответа:</b> {participant.timestamp.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"📊 Осталось непроверенных: {len(unchecked)}"
+        )
+        
+        buttons = [
+            [
+                types.InlineKeyboardButton(
+                    text="✅ Принять",
+                    callback_data=f"admin_approve_{participant.user_id}_{raffle_date}"
+                ),
+                types.InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"admin_deny_{participant.user_id}_{raffle_date}"
+                )
+            ],
+            [types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_raffle_date_{raffle_date}")]
+        ]
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре непроверенных ответов: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
 @dp.callback_query(F.data.startswith("admin_approve_"))
 async def callback_approve(cb: types.CallbackQuery):
     """Принять ответ пользователя через кнопку"""
@@ -2158,6 +2268,24 @@ async def callback_approve(cb: types.CallbackQuery):
             
             if success:
                 await cb.answer("✅ Ответ принят!", show_alert=False)
+                
+                # Если это было из меню непроверенных ответов, показываем следующий
+                if raffle_date:
+                    unchecked = await get_unchecked_answers(raffle_date)
+                    if unchecked:
+                        # Показываем следующий непроверенный ответ
+                        class FakeCallback:
+                            def __init__(self, original_cb, new_data):
+                                self.from_user = original_cb.from_user
+                                self.message = original_cb.message
+                                self.data = new_data
+                            def answer(self, *args, **kwargs):
+                                pass  # Не вызываем answer дважды
+                        
+                        fake_cb = FakeCallback(cb, f"admin_unchecked_{raffle_date}")
+                        await admin_unchecked_answers(fake_cb)
+                        return
+                
                 # Редактируем сообщение, убирая кнопки
                 try:
                     await cb.message.edit_text(
@@ -2266,6 +2394,24 @@ async def callback_deny(cb: types.CallbackQuery):
             
             if success:
                 await cb.answer("❌ Ответ отклонен", show_alert=False)
+                
+                # Если это было из меню непроверенных ответов, показываем следующий
+                if raffle_date:
+                    unchecked = await get_unchecked_answers(raffle_date)
+                    if unchecked:
+                        # Показываем следующий непроверенный ответ
+                        class FakeCallback:
+                            def __init__(self, original_cb, new_data):
+                                self.from_user = original_cb.from_user
+                                self.message = original_cb.message
+                                self.data = new_data
+                            def answer(self, *args, **kwargs):
+                                pass  # Не вызываем answer дважды
+                        
+                        fake_cb = FakeCallback(cb, f"admin_unchecked_{raffle_date}")
+                        await admin_unchecked_answers(fake_cb)
+                        return
+                
                 # Редактируем сообщение, убирая кнопки
                 try:
                     await cb.message.edit_text(

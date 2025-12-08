@@ -861,6 +861,30 @@ async def get_participants_by_question(raffle_date: str, question_id: int) -> Li
         return []
 
 
+async def get_unchecked_answers(raffle_date: str) -> List[RaffleParticipant]:
+    """Получает список непроверенных ответов для даты розыгрыша
+    
+    Returns:
+        Список участников, которые ответили, но ответ еще не проверен (is_correct is None)
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(RaffleParticipant).where(
+                    and_(
+                        RaffleParticipant.raffle_date == raffle_date,
+                        RaffleParticipant.answer.isnot(None),
+                        RaffleParticipant.is_correct.is_(None),
+                        RaffleParticipant.question_id != 0  # Только те, кто получил вопрос
+                    )
+                ).order_by(RaffleParticipant.timestamp.asc())  # Сначала старые ответы
+            )
+            return list(result.scalars().all())
+    except Exception as e:
+        logger.error(f"Ошибка при получении непроверенных ответов: {e}")
+        return []
+
+
 async def approve_answer(user_id: int, raffle_date: str) -> bool:
     """Принимает ответ пользователя"""
     try:
