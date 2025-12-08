@@ -447,6 +447,82 @@ async def cmd_raffle_test_list(message: types.Message):
         logger.error(f"Ошибка при получении списка розыгрышей: {e}")
         await message.answer(f"❌ Ошибка: {e}")
 
+@dp.message(Command("raffle_create_retroactive"))
+async def cmd_raffle_create_retroactive(message: types.Message):
+    """Создание розыгрыша задним числом (только для админа)
+    
+    Используется для создания розыгрыша, если он не был создан автоматически.
+    Все данные участников сохраняются.
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer(
+                "❌ Использование: /raffle_create_retroactive ДАТА\n\n"
+                "Пример: /raffle_create_retroactive 2025-12-08\n\n"
+                "⚠️ Внимание: Эта команда создает розыгрыш в БД, если он не был создан.\n"
+                "Все данные участников сохраняются."
+            )
+            return
+        
+        raffle_date = parts[1]
+        
+        # Проверяем, существует ли уже розыгрыш
+        existing_raffle = await get_raffle_by_date(raffle_date)
+        if existing_raffle:
+            try:
+                date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = raffle_date
+            
+            await message.answer(
+                f"✅ Розыгрыш для {date_display} уже существует!\n\n"
+                f"Номер: #{existing_raffle.raffle_number}\n"
+                f"Статус: {'🟢 Активен' if existing_raffle.is_active else '🔴 Остановлен'}"
+            )
+            return
+        
+        # Создаем розыгрыш
+        raffle = await create_or_get_raffle(raffle_date, force_activate=False)
+        
+        if raffle:
+            try:
+                date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = raffle_date
+            
+            # Проверяем, сколько участников уже есть
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(RaffleParticipant).where(
+                        RaffleParticipant.raffle_date == raffle_date
+                    )
+                )
+                participants = result.scalars().all()
+                participants_count = len([p for p in participants if p.question_id != 0])
+                answered_count = len([p for p in participants if p.answer is not None])
+            
+            await message.answer(
+                f"✅ Розыгрыш #{raffle.raffle_number} для {date_display} успешно создан!\n\n"
+                f"📊 Статистика:\n"
+                f"   Участников: {participants_count}\n"
+                f"   Ответило: {answered_count}\n\n"
+                f"Все данные участников сохранены."
+            )
+            logger.info(f"Админ {message.from_user.id} создал розыгрыш #{raffle.raffle_number} для {raffle_date} задним числом")
+        else:
+            await message.answer(f"❌ Ошибка при создании розыгрыша для {raffle_date}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при создании розыгрыша задним числом: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
 @dp.message(Command("raffle_reload_scheduler"))
 async def cmd_raffle_reload_scheduler(message: types.Message):
     """Перезагрузка планировщика розыгрышей (только для админа)"""

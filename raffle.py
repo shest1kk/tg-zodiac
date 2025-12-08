@@ -298,14 +298,15 @@ async def create_or_get_raffle(raffle_date: str, force_activate: bool = False) -
             next_number = (last_number or 0) + 1
             
             # Создаем новый розыгрыш
-            # Используем МСК время для created_at
-            from datetime import timezone, timedelta
-            moscow_tz = timezone(timedelta(hours=3))
+            # Используем МСК время для created_at, но убираем timezone для PostgreSQL
+            moscow_now = datetime.now(MOSCOW_TZ)
+            # Конвертируем в UTC и убираем timezone для совместимости с БД (TIMESTAMP WITHOUT TIME ZONE)
+            created_at_utc = moscow_now.astimezone(timezone.utc).replace(tzinfo=None)
             raffle = Raffle(
                 raffle_number=next_number,
                 raffle_date=raffle_date,
                 is_active=True,
-                created_at=datetime.now(moscow_tz)
+                created_at=created_at_utc
             )
             session.add(raffle)
             await session.commit()
@@ -383,7 +384,9 @@ async def auto_close_raffle(raffle_date: str) -> bool:
                 return True
             
             raffle.is_active = False
-            raffle.stopped_at = datetime.now(MOSCOW_TZ)
+            # Убираем timezone для PostgreSQL (TIMESTAMP WITHOUT TIME ZONE)
+            moscow_now = datetime.now(MOSCOW_TZ)
+            raffle.stopped_at = moscow_now.astimezone(timezone.utc).replace(tzinfo=None)
             await session.commit()
             
             logger.info(f"✅ Розыгрыш #{raffle.raffle_number} ({raffle_date}) автоматически закрыт в 23:59")
@@ -407,7 +410,9 @@ async def stop_raffle(raffle_date: str) -> bool:
                 return False
             
             raffle.is_active = False
-            raffle.stopped_at = datetime.now(MOSCOW_TZ)
+            # Убираем timezone для PostgreSQL (TIMESTAMP WITHOUT TIME ZONE)
+            moscow_now = datetime.now(MOSCOW_TZ)
+            raffle.stopped_at = moscow_now.astimezone(timezone.utc).replace(tzinfo=None)
             
             # Сбрасываем участие всех пользователей для этого розыгрыша
             # Это позволит им принять участие снова при перезапуске
