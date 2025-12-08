@@ -1955,27 +1955,21 @@ async def admin_raffle_date_menu(cb: types.CallbackQuery):
             callback_data=f"admin_questions_date_{raffle_date}"
         )])
         
-        # Добавляем кнопку для просмотра непроверенных ответов
-        unchecked = await get_unchecked_answers(raffle_date)
-        unchecked_count = len(unchecked)
-        
-        # Проверяем, сколько из них заблокировали бота
-        blocked_count = 0
-        if unchecked_count > 0:
-            for p in unchecked[:10]:  # Проверяем первые 10 для скорости
-                try:
-                    await bot.send_chat_action(p.user_id, "typing")
-                except TelegramForbiddenError:
-                    blocked_count += 1
-                except:
-                    pass
-        
-        if unchecked_count > 0:
-            button_text = f"⏳ Непроверенные ответы ({unchecked_count})"
-            if blocked_count > 0:
-                button_text += f" 🚫{blocked_count}"
+        # Добавляем кнопку для просмотра непроверенных ответов (всегда показываем)
+        try:
+            unchecked = await get_unchecked_answers(raffle_date)
+            unchecked_count = len(unchecked)
+            logger.debug(f"Непроверенные ответы для {raffle_date}: {unchecked_count}")
+            
             buttons.append([types.InlineKeyboardButton(
-                text=button_text,
+                text=f"⏳ Непроверенные ответы ({unchecked_count})",
+                callback_data=f"admin_unchecked_{raffle_date}"
+            )])
+        except Exception as e:
+            logger.error(f"Ошибка при получении непроверенных ответов для {raffle_date}: {e}", exc_info=True)
+            # Показываем кнопку даже при ошибке
+            buttons.append([types.InlineKeyboardButton(
+                text="⏳ Непроверенные ответы",
                 callback_data=f"admin_unchecked_{raffle_date}"
             )])
         
