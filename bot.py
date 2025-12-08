@@ -2216,13 +2216,27 @@ async def admin_unchecked_answers(cb: types.CallbackQuery):
             f"📋 <b>Вопрос:</b> {question_title}\n"
             f"{question_text}\n\n"
             f"👤 <b>Пользователь:</b> {user_info}\n"
-            f"💬 <b>Ответ:</b> {participant.answer}\n"
-            f"⏰ <b>Время ответа:</b> {participant.timestamp.strftime('%d.%m.%Y %H:%M')}\n\n"
-            f"📊 Осталось непроверенных: {len(unchecked)}"
         )
         
-        buttons = [
-            [
+        # Проверяем, ответил ли пользователь
+        if participant.answer:
+            text += (
+                f"💬 <b>Ответ:</b> {participant.answer}\n"
+                f"⏰ <b>Время ответа:</b> {participant.timestamp.strftime('%d.%m.%Y %H:%M')}\n\n"
+            )
+        else:
+            text += (
+                f"⏳ <b>Пользователь еще не ответил на вопрос</b>\n"
+                f"⏰ <b>Время получения вопроса:</b> {participant.timestamp.strftime('%d.%m.%Y %H:%M')}\n\n"
+            )
+        
+        text += f"📊 Осталось непроверенных: {len(unchecked)}"
+        
+        buttons = []
+        
+        # Кнопки принятия/отклонения только для тех, кто ответил
+        if participant.answer:
+            buttons.append([
                 types.InlineKeyboardButton(
                     text="✅ Принять",
                     callback_data=f"admin_approve_{participant.user_id}_{raffle_date}"
@@ -2231,9 +2245,17 @@ async def admin_unchecked_answers(cb: types.CallbackQuery):
                     text="❌ Отклонить",
                     callback_data=f"admin_deny_{participant.user_id}_{raffle_date}"
                 )
-            ],
-            [types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_raffle_date_{raffle_date}")]
-        ]
+            ])
+        else:
+            # Если пользователь не ответил, показываем только кнопку "Пропустить"
+            buttons.append([
+                types.InlineKeyboardButton(
+                    text="⏭️ Пропустить (не ответил)",
+                    callback_data=f"admin_unchecked_{raffle_date}"
+                )
+            ])
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_raffle_date_{raffle_date}")])
         
         await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
         await cb.answer()

@@ -865,7 +865,8 @@ async def get_unchecked_answers(raffle_date: str) -> List[RaffleParticipant]:
     """Получает список непроверенных ответов для даты розыгрыша
     
     Returns:
-        Список участников, которые ответили, но ответ еще не проверен (is_correct is None)
+        Список участников, которые получили вопрос, но ответ еще не проверен (is_correct is None).
+        Приоритет отдается тем, кто уже ответил (answer is not None).
     """
     try:
         async with AsyncSessionLocal() as session:
@@ -873,13 +874,23 @@ async def get_unchecked_answers(raffle_date: str) -> List[RaffleParticipant]:
                 select(RaffleParticipant).where(
                     and_(
                         RaffleParticipant.raffle_date == raffle_date,
-                        RaffleParticipant.answer.isnot(None),
                         RaffleParticipant.is_correct.is_(None),
                         RaffleParticipant.question_id != 0  # Только те, кто получил вопрос
                     )
-                ).order_by(RaffleParticipant.timestamp.asc())  # Сначала старые ответы
+                ).order_by(
+                    # Сначала те, кто ответил (answer is not None), потом те, кто не ответил
+                    RaffleParticipant.answer.isnot(None).desc(),
+                    RaffleParticipant.timestamp.asc()  # Внутри группы - по времени
+                )
             )
-            return list(result.scalars().all())
+            participants = list(result.scalars().all())
+            
+            # Фильтруем: сначала показываем тех, кто ответил, потом тех, кто не ответил
+            answered = [p for p in participants if p.answer is not None]
+            not_answered = [p for p in participants if p.answer is None]
+            
+            # Возвращаем сначала ответивших, потом не ответивших
+            return answered + not_answered
     except Exception as e:
         logger.error(f"Ошибка при получении непроверенных ответов: {e}")
         return []
