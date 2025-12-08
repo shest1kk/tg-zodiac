@@ -2012,7 +2012,14 @@ async def admin_raffle_question(cb: types.CallbackQuery):
         if active_participants:
             text += "Список участников:\n"
             for i, p in enumerate(active_participants[:20], 1):  # Показываем первые 20
-                status = "✅ принят" if p.is_correct is True else ("❌ отклонен" if p.is_correct is False else "⏳ не проверен")
+                if p.is_correct is True:
+                    status = "✅ принят"
+                elif p.is_correct is False:
+                    status = "❌ отклонен"
+                elif p.answer is None:
+                    status = "⏳ не ответил"
+                else:
+                    status = "⏳ не проверен"
                 text += f"{i}. ID: {p.user_id} - {status}\n"
             
             if len(active_participants) > 20:
@@ -2020,13 +2027,26 @@ async def admin_raffle_question(cb: types.CallbackQuery):
         else:
             text += "Участников пока нет."
         
+        # Подсчитываем тех, кто не ответил
+        not_answered_count = len([p for p in active_participants if p.answer is None])
+        
         buttons = [
             [types.InlineKeyboardButton(
                 text="🔍 Проверить результаты",
                 callback_data=f"admin_raffle_results_{raffle_date}_{question_id}"
-            )],
-            [types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_raffle_date_{raffle_date}")]
+            )]
         ]
+        
+        # Добавляем кнопку напоминания только если есть те, кто не ответил
+        if not_answered_count > 0:
+            buttons.append([
+                types.InlineKeyboardButton(
+                    text=f"📨 Отправить напоминание ({not_answered_count})",
+                    callback_data=f"admin_send_reminder_{raffle_date}_{question_id}"
+                )
+            ])
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_raffle_date_{raffle_date}")])
         
         await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
         await cb.answer()
@@ -2132,6 +2152,81 @@ async def admin_raffle_results(cb: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка при просмотре результатов: {e}")
         await cb.answer("Ошибка", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_send_reminder_"))
+async def admin_send_reminder(cb: types.CallbackQuery):
+    """Отправка напоминания тем, кто не ответил на вопрос"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        parts = cb.data.split("_")
+        raffle_date = parts[3]
+        question_id = int(parts[4])
+        
+        question = get_question_by_id(question_id, raffle_date)
+        if not question:
+            await cb.answer("Вопрос не найден", show_alert=True)
+            return
+        
+        participants = await get_participants_by_question(raffle_date, question_id)
+        
+        # Фильтруем только тех, кто нажал кнопку, но не ответил
+        not_answered = [p for p in participants if p.question_id != 0 and p.answer is None]
+        
+        if not not_answered:
+            await cb.answer("Нет участников, которым нужно отправить напоминание", show_alert=True)
+            return
+        
+        # Текст напоминания
+        reminder_text = (
+            "⏰ От тебя не поступил ответ на задание.\n\n"
+            "Ждем тебя на следующем задании! 💫"
+        )
+        
+        # Отправляем напоминания
+        sent_count = 0
+        blocked_count = 0
+        error_count = 0
+        
+        await cb.answer("Отправка напоминаний...", show_alert=False)
+        
+        for participant in not_answered:
+            success = await safe_send_message(bot, participant.user_id, reminder_text)
+            if success:
+                sent_count += 1
+            else:
+                # Проверяем, заблокирован ли бот
+                try:
+                    await bot.send_chat_action(participant.user_id, "typing")
+                    error_count += 1
+                except TelegramForbiddenError:
+                    blocked_count += 1
+                except Exception:
+                    error_count += 1
+            
+            # Небольшая задержка между отправками
+            await asyncio.sleep(RATE_LIMIT_DELAY)
+        
+        # Формируем отчет для админа
+        report_text = (
+            f"📨 <b>Напоминания отправлены</b>\n\n"
+            f"✅ Отправлено: {sent_count}\n"
+        )
+        
+        if blocked_count > 0:
+            report_text += f"🚫 Заблокировали бота: {blocked_count}\n"
+        
+        if error_count > 0:
+            report_text += f"❌ Ошибок: {error_count}\n"
+        
+        await cb.message.answer(report_text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отправке напоминаний: {e}", exc_info=True)
+        await cb.answer("Ошибка при отправке", show_alert=True)
 
 @dp.callback_query(F.data.startswith("admin_unchecked_"))
 async def admin_unchecked_answers(cb: types.CallbackQuery):
