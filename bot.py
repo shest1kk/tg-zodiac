@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BotCommand
+from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import select, and_
 from database import AsyncSessionLocal, init_db, User, RaffleParticipant, Raffle
@@ -1955,22 +1956,26 @@ async def admin_raffle_date_menu(cb: types.CallbackQuery):
         )])
         
         # Добавляем кнопку для просмотра непроверенных ответов
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(RaffleParticipant).where(
-                    and_(
-                        RaffleParticipant.raffle_date == raffle_date,
-                        RaffleParticipant.answer.isnot(None),
-                        RaffleParticipant.is_correct.is_(None)
-                    )
-                )
-            )
-            unchecked = result.scalars().all()
-            unchecked_count = len(unchecked)
+        unchecked = await get_unchecked_answers(raffle_date)
+        unchecked_count = len(unchecked)
+        
+        # Проверяем, сколько из них заблокировали бота
+        blocked_count = 0
+        if unchecked_count > 0:
+            for p in unchecked[:10]:  # Проверяем первые 10 для скорости
+                try:
+                    await bot.send_chat_action(p.user_id, "typing")
+                except TelegramForbiddenError:
+                    blocked_count += 1
+                except:
+                    pass
         
         if unchecked_count > 0:
+            button_text = f"⏳ Непроверенные ответы ({unchecked_count})"
+            if blocked_count > 0:
+                button_text += f" 🚫{blocked_count}"
             buttons.append([types.InlineKeyboardButton(
-                text=f"⏳ Непроверенные ответы ({unchecked_count})",
+                text=button_text,
                 callback_data=f"admin_unchecked_{raffle_date}"
             )])
         
@@ -2174,6 +2179,18 @@ async def admin_unchecked_answers(cb: types.CallbackQuery):
         username = f"@{user.username}" if user and user.username else ""
         first_name = user.first_name if user and user.first_name else ""
         
+        # Проверяем, заблокирован ли бот пользователем
+        user_blocked = False
+        try:
+            # Пытаемся отправить тестовое сообщение (невидимое для пользователя)
+            await bot.send_chat_action(participant.user_id, "typing")
+        except TelegramForbiddenError:
+            user_blocked = True
+            logger.info(f"Пользователь {participant.user_id} заблокировал бота")
+        except Exception as e:
+            # Другие ошибки игнорируем (может быть временная проблема)
+            logger.debug(f"Ошибка при проверке статуса пользователя {participant.user_id}: {e}")
+        
         # Получаем вопрос
         question = get_question_by_id(participant.question_id, raffle_date)
         question_title = question.get('title', 'Вопрос') if question else 'Вопрос'
@@ -2191,9 +2208,17 @@ async def admin_unchecked_answers(cb: types.CallbackQuery):
             user_info += f" {username}"
         if first_name:
             user_info += f" ({first_name})"
+        if user_blocked:
+            user_info += " 🚫 <b>(заблокировал бота)</b>"
         
         text = (
             f"⏳ <b>Непроверенные ответы для {date_display}</b>\n\n"
+        )
+        
+        if user_blocked:
+            text += "⚠️ <b>ВНИМАНИЕ:</b> Пользователь заблокировал бота. Сообщение о результате не будет отправлено.\n\n"
+        
+        text += (
             f"📋 <b>Вопрос:</b> {question_title}\n"
             f"{question_text}\n\n"
             f"👤 <b>Пользователь:</b> {user_info}\n"
