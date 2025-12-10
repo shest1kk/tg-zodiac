@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 from datetime import datetime, timezone, timedelta, time as dt_time
 from pathlib import Path
@@ -2761,11 +2762,15 @@ async def admin_quiz_question_edit(cb: types.CallbackQuery):
         options = question.get('options', {})
         correct_answer = question.get('correct_answer', '')
         
-        text += f"<b>Вопрос:</b> {question_text}\n\n"
+        # Экранируем HTML-символы для безопасного отображения
+        question_text_escaped = html.escape(question_text)
+        
+        text += f"<b>Вопрос:</b> {question_text_escaped}\n\n"
         text += "<b>Варианты ответов:</b>\n"
         for key, value in sorted(options.items()):
             marker = "✅" if key == correct_answer else "  "
-            text += f"{marker} {key}: {value}\n"
+            value_escaped = html.escape(str(value))
+            text += f"{marker} {key}: {value_escaped}\n"
         
         text += f"\n<b>Правильный ответ:</b> {correct_answer}\n\n"
         
