@@ -1,13 +1,15 @@
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time as dt_time
+from pathlib import Path
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import FSInputFile
 from aiogram.filters import Command
 from aiogram.types import BotCommand
 from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import select, and_
-from database import AsyncSessionLocal, init_db, User, RaffleParticipant, Raffle
+from database import AsyncSessionLocal, init_db, User, RaffleParticipant, Raffle, Quiz, QuizParticipant, QuizResult
 from config import TG_TOKEN, DAILY_HOUR, DAILY_MINUTE, logger, ZODIAC_NAMES, ADMIN_ID, ADMIN_IDS
 from scheduler import start_scheduler, stop_scheduler, get_day_number, get_today_prediction, load_predictions
 from resilience import safe_send_message, safe_send_photo, RATE_LIMIT_DELAY
@@ -19,6 +21,16 @@ from raffle import (
     create_or_get_raffle, stop_raffle, is_raffle_active,
     get_raffle_by_date, get_last_active_raffle, has_raffle_started, RAFFLE_DATES,
     get_unchecked_answers, get_users_for_reminder
+)
+from quiz import (
+    send_quiz_announcement, send_quiz_reminder, mark_non_participants,
+    load_quiz, get_question_by_id as get_quiz_question, get_total_questions,
+    get_next_ticket_number, check_quiz_timeout, QUIZ_ANSWER_TIME, QUIZ_START_DATE,
+    QUIZ_END_DATE, QUIZ_MIN_CORRECT_ANSWERS, quiz_timeout_tasks,
+    MOSCOW_TZ as QUIZ_MOSCOW_TZ, QUIZ_PARTICIPATION_WINDOW, create_or_get_quiz,
+    get_all_questions as get_all_quiz_questions, get_all_quiz_dates,
+    update_quiz_question, has_quiz_started, get_quiz,
+    QUIZ_HOUR, QUIZ_MINUTE
 )
 
 bot = Bot(TG_TOKEN)
@@ -233,6 +245,7 @@ def admin_keyboard():
         [types.InlineKeyboardButton(text="📢 Массовая рассылка", callback_data="admin_broadcast")],
         [types.InlineKeyboardButton(text="📝 Редактировать предсказания", callback_data="admin_edit_predictions")],
         [types.InlineKeyboardButton(text="🎁 Розыгрыш", callback_data="admin_raffle")],
+        [types.InlineKeyboardButton(text="🎯 Квиз", callback_data="admin_quiz")],
         [types.InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users_list")],
         [types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [types.InlineKeyboardButton(text="📤 Тестовая отправка", callback_data="admin_test_send")]
@@ -2150,6 +2163,745 @@ async def admin_raffle_results(cb: types.CallbackQuery):
         await cb.answer("Ошибка", show_alert=True)
 
 
+@dp.callback_query(F.data == "admin_quiz")
+async def admin_quiz_menu(cb: types.CallbackQuery):
+    """Меню админ-панели для квизов - список всех возможных дат"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        # Генерируем список дат квизов с 11.12 по 16.12
+        from datetime import timedelta
+        start_date = datetime.strptime(QUIZ_START_DATE, "%Y-%m-%d").date()
+        end_date = datetime.strptime(QUIZ_END_DATE, "%Y-%m-%d").date()
+        
+        quiz_dates = []
+        current_date = start_date
+        while current_date <= end_date:
+            quiz_dates.append(current_date.strftime("%Y-%m-%d"))
+            current_date += timedelta(days=1)
+        
+        # Получаем все квизы из базы данных для проверки статуса
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Quiz)
+            )
+            quizzes_db = {q.quiz_date: q for q in result.scalars().all()}
+        
+        text = "🎯 <b>Квиз</b>\n\nВыбери дату квиза:\n\n"
+        
+        buttons = []
+        for quiz_date in quiz_dates:
+            # Форматируем дату для отображения
+            try:
+                date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m")
+            except:
+                date_display = quiz_date
+            
+            # Проверяем, есть ли квиз в БД
+            quiz = quizzes_db.get(quiz_date)
+            if quiz:
+                # Проверяем активность
+                moscow_now = datetime.now(QUIZ_MOSCOW_TZ)
+                quiz_date_obj = datetime.strptime(quiz_date, "%Y-%m-%d").date()
+                
+                # Время начала квиза (QUIZ_HOUR:QUIZ_MINUTE МСК)
+                quiz_start_time = datetime.combine(quiz_date_obj, dt_time(hour=QUIZ_HOUR, minute=QUIZ_MINUTE))
+                quiz_start_time = quiz_start_time.replace(tzinfo=QUIZ_MOSCOW_TZ)
+                
+                # Время окончания квиза (QUIZ_HOUR:QUIZ_MINUTE + 6 часов МСК)
+                quiz_end_time = quiz_start_time + timedelta(hours=QUIZ_PARTICIPATION_WINDOW)
+                
+                # Проверяем, был ли отправлен announcement
+                async with AsyncSessionLocal() as session:
+                    announcement_check = await session.execute(
+                        select(QuizParticipant).where(
+                            and_(
+                                QuizParticipant.quiz_date == quiz_date,
+                                QuizParticipant.announcement_time.isnot(None)
+                            )
+                        ).limit(1)
+                    )
+                    has_announcement = announcement_check.scalar_one_or_none() is not None
+                
+                if has_announcement:
+                    # Квиз начался - проверяем время
+                    if quiz.is_active and moscow_now >= quiz_start_time and moscow_now < quiz_end_time:
+                        status_icon = "🟢"
+                        status_text = "Активен"
+                    elif moscow_now >= quiz_end_time:
+                        status_icon = "🔵"
+                        status_text = "Завершен"
+                    else:
+                        status_icon = "🔴"
+                        status_text = "Остановлен"
+                else:
+                    # Квиз создан, но еще не начался
+                    if moscow_now < quiz_start_time:
+                        status_icon = "⏳"
+                        status_text = "Ожидает запуска"
+                    elif quiz.is_active:
+                        status_icon = "🟢"
+                        status_text = "Активен"
+                    else:
+                        status_icon = "🔴"
+                        status_text = "Остановлен"
+                
+                button_text = f"{status_icon} Квиз от {date_display} ({status_text})"
+            else:
+                # Квиз еще не создан
+                status_icon = "⚪"
+                button_text = f"{status_icon} {date_display} (не создан)"
+            
+            buttons.append([types.InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"admin_quiz_date_{quiz_date}"
+            )])
+        
+        if not buttons:
+            text = "🎯 <b>Квиз</b>\n\n❌ Не удалось загрузить даты квизов."
+            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")]]
+        else:
+            buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")])
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при открытии меню квиза: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_quiz_date_"))
+async def admin_quiz_date_menu(cb: types.CallbackQuery):
+    """Меню для конкретной даты квиза - детальная информация"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        quiz_date = cb.data.split("_")[-1]
+        
+        # Получаем информацию о квизе (без создания, только для просмотра)
+        quiz = await get_quiz(quiz_date)
+        
+        # Форматируем дату для отображения
+        try:
+            date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = quiz_date
+        
+        # Проверяем статус
+        moscow_now = datetime.now(QUIZ_MOSCOW_TZ)
+        quiz_date_obj = datetime.strptime(quiz_date, "%Y-%m-%d").date()
+        
+        # Время начала квиза (QUIZ_HOUR:QUIZ_MINUTE МСК)
+        quiz_start_time = datetime.combine(quiz_date_obj, dt_time(hour=QUIZ_HOUR, minute=QUIZ_MINUTE))
+        quiz_start_time = quiz_start_time.replace(tzinfo=QUIZ_MOSCOW_TZ)
+        
+        # Время окончания квиза (QUIZ_HOUR:QUIZ_MINUTE + 6 часов МСК)
+        quiz_end_time = quiz_start_time + timedelta(hours=QUIZ_PARTICIPATION_WINDOW)
+        
+        if quiz:
+            # Проверяем, был ли отправлен announcement (квиз начался)
+            async with AsyncSessionLocal() as session:
+                announcement_check = await session.execute(
+                    select(QuizParticipant).where(
+                        and_(
+                            QuizParticipant.quiz_date == quiz_date,
+                            QuizParticipant.announcement_time.isnot(None)
+                        )
+                    ).limit(1)
+                )
+                has_announcement = announcement_check.scalar_one_or_none() is not None
+            
+            if has_announcement:
+                # Квиз начался - проверяем время
+                if quiz.is_active and moscow_now >= quiz_start_time and moscow_now < quiz_end_time:
+                    status = "🟢 Активен"
+                elif moscow_now >= quiz_end_time:
+                    status = "🔵 Завершен"
+                else:
+                    status = "🔴 Остановлен"
+            else:
+                # Квиз создан, но еще не начался (announcement не отправлен)
+                if moscow_now < quiz_start_time:
+                    status = "⏳ Ожидает запуска"
+                elif quiz.is_active:
+                    status = "🟢 Активен"
+                else:
+                    status = "🔴 Остановлен"
+        else:
+            status = "⚪ Не создан"
+        
+        text = f"🎯 <b>Квиз от {date_display}</b>\n{status}\n\n"
+        
+        # Получаем статистику
+        async with AsyncSessionLocal() as session:
+            # Все участники
+            participants_result = await session.execute(
+                select(QuizParticipant).where(QuizParticipant.quiz_date == quiz_date)
+            )
+            all_participants = participants_result.scalars().all()
+            
+            # Получили билетик
+            tickets_result = await session.execute(
+                select(QuizResult).where(
+                    and_(
+                        QuizResult.quiz_date == quiz_date,
+                        QuizResult.ticket_number.isnot(None)
+                    )
+                )
+            )
+            with_tickets = tickets_result.scalars().all()
+            
+            # Не получили билетик (но начали квиз - прошли или не успели)
+            no_tickets_result = await session.execute(
+                select(QuizResult).where(
+                    and_(
+                        QuizResult.quiz_date == quiz_date,
+                        QuizResult.ticket_number.is_(None),
+                        QuizResult.total_questions > 0  # Начали квиз (отличает от не принявших участие)
+                    )
+                )
+            )
+            no_tickets = no_tickets_result.scalars().all()
+            
+            # Не приняли участие
+            non_participants_result = await session.execute(
+                select(QuizResult).where(
+                    and_(
+                        QuizResult.quiz_date == quiz_date,
+                        QuizResult.correct_answers == 0,
+                        QuizResult.total_questions == 0
+                    )
+                )
+            )
+            non_participants = non_participants_result.scalars().all()
+        
+        text += (
+            f"📊 <b>Статистика:</b>\n"
+            f"👥 Всего участников: {len(all_participants)}\n"
+            f"🎫 Получили билетик: {len(with_tickets)}\n"
+            f"❌ Не получили билетик: {len(no_tickets)}\n"
+            f"⏭️ Не приняли участие: {len(non_participants)}\n"
+        )
+        
+        buttons = [
+            [types.InlineKeyboardButton(
+                text=f"👥 Все участники ({len(all_participants)})",
+                callback_data=f"admin_quiz_participants_{quiz_date}"
+            )],
+            [types.InlineKeyboardButton(
+                text=f"🎫 Получили билетик ({len(with_tickets)})",
+                callback_data=f"admin_quiz_tickets_{quiz_date}"
+            )],
+            [types.InlineKeyboardButton(
+                text=f"❌ Не получили билетик ({len(no_tickets)})",
+                callback_data=f"admin_quiz_no_tickets_{quiz_date}"
+            )],
+            [types.InlineKeyboardButton(
+                text=f"⏭️ Не приняли участие ({len(non_participants)})",
+                callback_data=f"admin_quiz_non_participants_{quiz_date}"
+            )]
+        ]
+        
+        # Добавляем кнопку редактирования вопросов только если квиз не начался
+        quiz_started = await has_quiz_started(quiz_date)
+        if not quiz_started:
+            buttons.append([types.InlineKeyboardButton(
+                text="✏️ Редактировать вопросы",
+                callback_data=f"admin_quiz_questions_date_{quiz_date}"
+            )])
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data="admin_quiz")])
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при открытии меню квиза для даты: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_quiz_participants_"))
+async def admin_quiz_participants(cb: types.CallbackQuery):
+    """Просмотр всех участников квиза"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        quiz_date = cb.data.split("_")[-1]
+        
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(QuizParticipant).where(QuizParticipant.quiz_date == quiz_date)
+            )
+            participants = result.scalars().all()
+            
+            # Получаем информацию о пользователях
+            user_ids = [p.user_id for p in participants]
+            users_result = await session.execute(
+                select(User).where(User.id.in_(user_ids))
+            )
+            users = {u.id: u for u in users_result.scalars().all()}
+        
+        try:
+            date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = quiz_date
+        
+        text = f"👥 <b>Все участники квиза от {date_display}</b>\n\n"
+        
+        if participants:
+            for i, p in enumerate(participants[:50], 1):  # Показываем первые 50
+                user = users.get(p.user_id)
+                username = f"@{user.username}" if user and user.username else ""
+                first_name = user.first_name if user and user.first_name else ""
+                
+                user_info = f"<b>ID: {p.user_id}</b>"
+                if username:
+                    user_info += f" {username}"
+                if first_name:
+                    user_info += f" ({first_name})"
+                
+                status = "✅ Завершен" if p.completed else ("⏳ В процессе" if p.started_at else "⏸️ Не начат")
+                text += f"{i}. {user_info} - {status}\n"
+            
+            if len(participants) > 50:
+                text += f"\n... и еще {len(participants) - 50} участников"
+        else:
+            text += "Участников пока нет."
+        
+        buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_quiz_date_{quiz_date}")]]
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре участников квиза: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_quiz_tickets_"))
+async def admin_quiz_tickets(cb: types.CallbackQuery):
+    """Просмотр тех, кто получил билетик"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        quiz_date = cb.data.split("_")[-1]
+        
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(QuizResult).where(
+                    and_(
+                        QuizResult.quiz_date == quiz_date,
+                        QuizResult.ticket_number.isnot(None)
+                    )
+                ).order_by(QuizResult.ticket_number.asc())
+            )
+            results = result.scalars().all()
+        
+        try:
+            date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = quiz_date
+        
+        text = f"🎫 <b>Получили билетик (квиз от {date_display})</b>\n\n"
+        
+        if results:
+            for i, r in enumerate(results[:50], 1):  # Показываем первые 50
+                user_info = f"<b>ID: {r.user_id}</b>"
+                if r.username:
+                    user_info += f" @{r.username}"
+                
+                text += f"{i}. {user_info} - Билетик №{r.ticket_number} ({r.correct_answers}/{r.total_questions})\n"
+            
+            if len(results) > 50:
+                text += f"\n... и еще {len(results) - 50} участников"
+        else:
+            text += "Никто еще не получил билетик."
+        
+        buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_quiz_date_{quiz_date}")]]
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре получивших билетик: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_quiz_no_tickets_"))
+async def admin_quiz_no_tickets(cb: types.CallbackQuery):
+    """Просмотр тех, кто не получил билетик"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        quiz_date = cb.data.split("_")[-1]
+        
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(QuizResult).where(
+                    and_(
+                        QuizResult.quiz_date == quiz_date,
+                        QuizResult.ticket_number.is_(None),
+                        QuizResult.total_questions > 0  # Начали квиз (отличает от не принявших участие)
+                    )
+                ).order_by(QuizResult.correct_answers.desc())
+            )
+            results = result.scalars().all()
+        
+        try:
+            date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = quiz_date
+        
+        text = f"❌ <b>Не получили билетик (квиз от {date_display})</b>\n\n"
+        
+        if results:
+            for i, r in enumerate(results[:50], 1):  # Показываем первые 50
+                user_info = f"<b>ID: {r.user_id}</b>"
+                if r.username:
+                    user_info += f" @{r.username}"
+                
+                text += f"{i}. {user_info} - {r.correct_answers}/{r.total_questions} правильных\n"
+            
+            if len(results) > 50:
+                text += f"\n... и еще {len(results) - 50} участников"
+        else:
+            text += "Все участники получили билетик или никто не прошел квиз."
+        
+        buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_quiz_date_{quiz_date}")]]
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре не получивших билетик: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_quiz_non_participants_"))
+async def admin_quiz_non_participants(cb: types.CallbackQuery):
+    """Просмотр тех, кто не принял участие"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        quiz_date = cb.data.split("_")[-1]
+        
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(QuizResult).where(
+                    and_(
+                        QuizResult.quiz_date == quiz_date,
+                        QuizResult.correct_answers == 0,
+                        QuizResult.total_questions == 0
+                    )
+                )
+            )
+            results = result.scalars().all()
+        
+        try:
+            date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = quiz_date
+        
+        text = f"⏭️ <b>Не приняли участие (квиз от {date_display})</b>\n\n"
+        
+        if results:
+            for i, r in enumerate(results[:50], 1):  # Показываем первые 50
+                user_info = f"<b>ID: {r.user_id}</b>"
+                if r.username:
+                    user_info += f" @{r.username}"
+                
+                text += f"{i}. {user_info}\n"
+            
+            if len(results) > 50:
+                text += f"\n... и еще {len(results) - 50} участников"
+        else:
+            text += "Все приняли участие в квизе."
+        
+        buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_quiz_date_{quiz_date}")]]
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре не принявших участие: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_quiz_questions_date_"))
+async def admin_quiz_questions_date_menu(cb: types.CallbackQuery):
+    """Меню вопросов квиза для конкретной даты"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        quiz_date = cb.data.split("_")[-1]
+        questions = get_all_quiz_questions(quiz_date)
+        
+        if not questions:
+            try:
+                date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = quiz_date
+            
+            text = f"❓ <b>Вопросы квиза для {date_display}</b>\n\nВопросы не найдены."
+            buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_quiz_date_{quiz_date}")]]
+            await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+            await cb.answer()
+            return
+        
+        try:
+            date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = quiz_date
+        
+        # Проверяем, начался ли квиз
+        quiz_started = await has_quiz_started(quiz_date)
+        
+        text = f"❓ <b>Вопросы квиза для {date_display}</b>\n\n"
+        
+        if quiz_started:
+            text += "⛔ <b>Квиз уже начался!</b> Редактирование недоступно.\n\n"
+        
+        text += "Выбери вопрос для просмотра:\n\n"
+        
+        buttons = []
+        for question in questions:
+            question_id = question.get('id')
+            question_text = question.get('question', f'Вопрос #{question_id}')
+            # Обрезаем текст вопроса для отображения
+            if len(question_text) > 40:
+                question_text = question_text[:40] + "..."
+            icon = "🔒" if quiz_started else "❓"
+            buttons.append([
+                types.InlineKeyboardButton(
+                    text=f"{icon} Вопрос #{question_id}: {question_text}",
+                    callback_data=f"admin_quiz_question_edit_{quiz_date}_{question_id}"
+                )
+            ])
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_quiz_date_{quiz_date}")])
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при открытии меню вопросов квиза для даты: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("admin_quiz_question_edit_"))
+async def admin_quiz_question_edit(cb: types.CallbackQuery):
+    """Просмотр и редактирование вопроса квиза"""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    try:
+        # Формат: admin_quiz_question_edit_{quiz_date}_{question_id}
+        # quiz_date может содержать дефисы (2025-12-12), поэтому разбиваем правильно
+        data_parts = cb.data.split("_", 4)  # Разбиваем только первые 4 части
+        if len(data_parts) < 5:
+            await cb.answer("❌ Неверный формат данных", show_alert=True)
+            return
+        
+        # data_parts[4] содержит "{quiz_date}_{question_id}"
+        remaining = data_parts[4]
+        # Разделяем дату и ID вопроса (дата заканчивается, затем идет подчеркивание и ID)
+        # Ищем последнее подчеркивание, перед которым идет дата
+        last_underscore = remaining.rfind("_")
+        if last_underscore == -1:
+            await cb.answer("❌ Неверный формат данных", show_alert=True)
+            return
+        
+        quiz_date = remaining[:last_underscore]
+        question_id = int(remaining[last_underscore + 1:])
+        
+        question = get_quiz_question(question_id, quiz_date)
+        
+        if not question:
+            await cb.answer("Вопрос не найден", show_alert=True)
+            return
+        
+        try:
+            date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+            date_display = date_obj.strftime("%d.%m.%Y")
+        except:
+            date_display = quiz_date
+        
+        # Проверяем, начался ли квиз
+        quiz_started = await has_quiz_started(quiz_date)
+        
+        text = (
+            f"❓ <b>Вопрос #{question_id}</b>\n"
+            f"📅 Дата: {date_display}\n\n"
+        )
+        
+        if quiz_started:
+            text += "⛔ <b>Квиз уже начался!</b> Редактирование недоступно.\n\n"
+        
+        question_text = question.get('question', '')
+        options = question.get('options', {})
+        correct_answer = question.get('correct_answer', '')
+        
+        text += f"<b>Вопрос:</b> {question_text}\n\n"
+        text += "<b>Варианты ответов:</b>\n"
+        for key, value in sorted(options.items()):
+            marker = "✅" if key == correct_answer else "  "
+            text += f"{marker} {key}: {value}\n"
+        
+        text += f"\n<b>Правильный ответ:</b> {correct_answer}\n\n"
+        
+        if not quiz_started:
+            text += (
+                f"Для редактирования отправь команду:\n"
+                f"<code>/edit_quiz_question {quiz_date} {question_id} Текст вопроса | A:Вариант A | Б:Вариант Б | В:Вариант В | Г:Вариант Г | Правильный ответ</code>\n\n"
+                f"Пример:\n"
+                f"<code>/edit_quiz_question {quiz_date} {question_id} Какая температура воды? | A:+43+51С | Б:+18+22С | В:+65С | Г:+21+50С | Б</code>"
+            )
+        else:
+            text += "⚠️ Вопросы можно редактировать только до начала квиза."
+        
+        buttons = [
+            [types.InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"admin_quiz_questions_date_{quiz_date}")]
+        ]
+        
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре вопроса квиза: {e}", exc_info=True)
+        await cb.answer("Ошибка", show_alert=True)
+
+
+@dp.message(Command("edit_quiz_question"))
+async def cmd_edit_quiz_question(message: types.Message):
+    """Редактирование вопроса квиза через команду"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            await message.answer(
+                "❌ Неверный формат. Используй:\n"
+                "<code>/edit_quiz_question ДАТА ID Вопрос | A:Вариант A | Б:Вариант Б | В:Вариант В | Г:Вариант Г | Правильный ответ</code>\n\n"
+                "Пример:\n"
+                "<code>/edit_quiz_question 2025-12-12 1 Какая температура воды? | A:+43+51С | Б:+18+22С | В:+65С | Г:+21+50С | Б</code>",
+                parse_mode="HTML"
+            )
+            return
+        
+        quiz_date = parts[1]
+        question_id = int(parts[2])
+        content = parts[3]
+        
+        if "|" not in content:
+            await message.answer("❌ Используй разделитель | между вопросом, вариантами ответов и правильным ответом")
+            return
+        
+        # Парсим содержимое
+        segments = [s.strip() for s in content.split("|")]
+        if len(segments) < 6:
+            await message.answer("❌ Неверный формат. Нужно: Вопрос | A:... | Б:... | В:... | Г:... | Правильный ответ")
+            return
+        
+        question_text = segments[0]
+        options = {}
+        correct_answer = None
+        
+        # Парсим варианты ответов
+        for segment in segments[1:5]:
+            if ":" not in segment:
+                await message.answer(f"❌ Неверный формат варианта ответа: {segment}. Используй формат 'A:Текст'")
+                return
+            key, value = segment.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+            if key not in ["A", "Б", "В", "Г"]:
+                await message.answer(f"❌ Неверный ключ варианта: {key}. Используй A, Б, В или Г")
+                return
+            options[key] = value
+        
+        # Правильный ответ
+        correct_answer = segments[5].strip()
+        if correct_answer not in ["A", "Б", "В", "Г"]:
+            await message.answer(f"❌ Неверный правильный ответ: {correct_answer}. Используй A, Б, В или Г")
+            return
+        
+        if not question_text:
+            await message.answer("❌ Текст вопроса не может быть пустым")
+            return
+        
+        # Проверяем, начался ли квиз
+        quiz_started = await has_quiz_started(quiz_date)
+        if quiz_started:
+            try:
+                date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = quiz_date
+            
+            await message.answer(
+                f"⛔ <b>Невозможно редактировать вопрос!</b>\n\n"
+                f"Квиз на {date_display} уже начался (объявления были отправлены пользователям).\n\n"
+                f"Вопросы можно редактировать только до начала квиза.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Проверяем, существует ли вопрос
+        existing_question = get_quiz_question(question_id, quiz_date)
+        if not existing_question:
+            await message.answer(f"❌ Вопрос с ID {question_id} для даты {quiz_date} не найден")
+            return
+        
+        # Обновляем вопрос
+        success = update_quiz_question(question_id, quiz_date, question_text, options, correct_answer)
+        
+        if success:
+            try:
+                date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = quiz_date
+            
+            options_text = "\n".join([f"{k}: {v}" for k, v in sorted(options.items())])
+            await message.answer(
+                f"✅ Вопрос #{question_id} для {date_display} успешно обновлен!\n\n"
+                f"<b>Вопрос:</b> {question_text}\n\n"
+                f"<b>Варианты ответов:</b>\n{options_text}\n\n"
+                f"<b>Правильный ответ:</b> {correct_answer}",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer("❌ Ошибка при обновлении вопроса. Проверь логи.")
+        
+    except ValueError as e:
+        await message.answer(f"❌ Ошибка в формате данных: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка при редактировании вопроса квиза: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+
 @dp.callback_query(F.data.startswith("admin_send_reminder_all_"))
 async def admin_send_reminder_all(cb: types.CallbackQuery):
     """Отправка напоминания всем, кто не ответил за 15 минут для всей даты розыгрыша"""
@@ -2969,10 +3721,404 @@ async def setup_bot_commands():
             logger.warning(f"Ошибка при установке админ-команд: {e}")
     logger.info("Команды бота настроены (админские команды скрыты от обычных пользователей)")
 
+# Хранилище для активных квизов: {user_id: quiz_date}
+active_quizzes = {}
+
+
+@dp.callback_query(F.data.startswith("quiz_ready_"))
+async def handle_quiz_ready(cb: types.CallbackQuery):
+    """Обработчик нажатия кнопки 'Я готов' для квиза"""
+    try:
+        quiz_date = cb.data.split("_")[-1]
+        user_id = cb.from_user.id
+        
+        # Проверяем, не истекло ли время (6 часов)
+        moscow_now = datetime.now(QUIZ_MOSCOW_TZ)
+        
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(QuizParticipant).where(
+                    and_(
+                        QuizParticipant.user_id == user_id,
+                        QuizParticipant.quiz_date == quiz_date
+                    )
+                )
+            )
+            participant = result.scalar_one_or_none()
+            
+            if not participant or not participant.announcement_time:
+                await cb.answer("❌ Ошибка: объявление не найдено", show_alert=True)
+                return
+            
+            # Проверяем время
+            announcement_utc = participant.announcement_time.replace(tzinfo=timezone.utc)
+            announcement_moscow = announcement_utc.astimezone(QUIZ_MOSCOW_TZ)
+            time_passed = (moscow_now - announcement_moscow).total_seconds() / 3600  # в часах
+            
+            if time_passed >= QUIZ_PARTICIPATION_WINDOW:
+                await cb.answer("⏰ Время на участие истекло. У тебя было 6 часов.", show_alert=True)
+                return
+            
+            # Проверяем, не начал ли уже квиз
+            if participant.started_at:
+                await cb.answer("⚠️ Ты уже начал этот квиз", show_alert=True)
+                return
+            
+            # Запускаем квиз
+            started_at_utc = moscow_now.astimezone(timezone.utc).replace(tzinfo=None)
+            participant.started_at = started_at_utc
+            participant.current_question = 1
+            participant.answers = "{}"  # Начинаем с пустого JSON
+            await session.commit()
+        
+        # Редактируем сообщение с объявлением
+        try:
+            await cb.message.edit_text(
+                "✅ Квиз начат! Отвечай на вопросы ниже.",
+                reply_markup=None
+            )
+        except:
+            pass
+        
+        await cb.answer()
+        
+        # Запускаем первый вопрос (без message_id, отправим новое сообщение)
+        await start_quiz_question(bot, user_id, quiz_date, 1, None)
+        
+        # Запускаем таймер на 15 минут
+        task = asyncio.create_task(check_quiz_timeout(bot, user_id, quiz_date))
+        quiz_timeout_tasks[user_id] = task
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обработке 'Я готов' для квиза: {e}", exc_info=True)
+        await cb.answer("❌ Ошибка при запуске квиза", show_alert=True)
+
+
+async def start_quiz_question(bot, user_id: int, quiz_date: str, question_num: int, question_message_id: int = None):
+    """Запускает вопрос квиза для пользователя"""
+    try:
+        question = get_quiz_question(question_num, quiz_date)
+        if not question:
+            await safe_send_message(bot, user_id, "❌ Ошибка: вопрос не найден")
+            return
+        
+        # Формируем текст вопроса
+        total_questions = get_total_questions(quiz_date)
+        question_text = f"❓ <b>Вопрос {question_num}/{total_questions}</b>\n\n{question['question']}"
+        
+        # Создаем кнопки с вариантами ответов
+        buttons = []
+        for option_key, option_text in question['options'].items():
+            buttons.append([types.InlineKeyboardButton(
+                text=f"{option_key}. {option_text}",
+                callback_data=f"quiz_answer_{quiz_date}_{question_num}_{option_key}"
+            )])
+        
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        # Если есть message_id - редактируем сообщение, иначе отправляем новое
+        if question_message_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=user_id,
+                    message_id=question_message_id,
+                    text=question_text,
+                    parse_mode="HTML",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отредактировать сообщение {question_message_id}, отправляем новое: {e}")
+                message = await bot.send_message(user_id, question_text, parse_mode="HTML", reply_markup=keyboard)
+                # Обновляем message_id в БД
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(
+                        select(QuizParticipant).where(
+                            and_(
+                                QuizParticipant.user_id == user_id,
+                                QuizParticipant.quiz_date == quiz_date
+                            )
+                        )
+                    )
+                    participant = result.scalar_one_or_none()
+                    if participant:
+                        participant.message_id = message.message_id
+                        await session.commit()
+        else:
+            message = await bot.send_message(user_id, question_text, parse_mode="HTML", reply_markup=keyboard)
+            # Сохраняем message_id в БД
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(QuizParticipant).where(
+                        and_(
+                            QuizParticipant.user_id == user_id,
+                            QuizParticipant.quiz_date == quiz_date
+                        )
+                    )
+                )
+                participant = result.scalar_one_or_none()
+                if participant:
+                    participant.message_id = message.message_id
+                    await session.commit()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при запуске вопроса квиза: {e}", exc_info=True)
+
+
+@dp.callback_query(F.data.startswith("quiz_answer_"))
+async def handle_quiz_answer(cb: types.CallbackQuery):
+    """Обработчик ответа на вопрос квиза"""
+    try:
+        parts = cb.data.split("_")
+        quiz_date = parts[2]
+        question_num = int(parts[3])
+        answer = parts[4]
+        user_id = cb.from_user.id
+        
+        # Получаем вопрос
+        question = get_quiz_question(question_num, quiz_date)
+        if not question:
+            await cb.answer("❌ Вопрос не найден", show_alert=True)
+            return
+        
+        # Проверяем, правильный ли ответ
+        is_correct = question['correct_answer'] == answer
+        
+        # Сохраняем ответ
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(QuizParticipant).where(
+                    and_(
+                        QuizParticipant.user_id == user_id,
+                        QuizParticipant.quiz_date == quiz_date
+                    )
+                )
+            )
+            participant = result.scalar_one_or_none()
+            
+            if not participant:
+                await cb.answer("❌ Ошибка: участник не найден", show_alert=True)
+                return
+            
+            # Проверяем, не завершен ли квиз (например, по таймауту)
+            if participant.completed:
+                await cb.answer("⏰ Время на прохождение квиза истекло.", show_alert=True)
+                return
+            
+            # Обновляем ответы
+            import json
+            answers = json.loads(participant.answers or "{}")
+            answers[str(question_num)] = answer
+            participant.answers = json.dumps(answers)
+            
+            # Переходим к следующему вопросу
+            total_questions = get_total_questions(quiz_date)
+            if question_num < total_questions:
+                participant.current_question = question_num + 1
+                await session.commit()
+                
+                # Переходим к следующему вопросу (редактируем то же сообщение)
+                await start_quiz_question(bot, user_id, quiz_date, question_num + 1, participant.message_id)
+            else:
+                # Квиз завершен
+                participant.completed = True
+                participant.current_question = 0
+                await session.commit()
+                
+                # Отменяем таймер
+                if user_id in quiz_timeout_tasks:
+                    quiz_timeout_tasks[user_id].cancel()
+                    quiz_timeout_tasks.pop(user_id, None)
+                
+                # Подсчитываем правильные ответы для отображения
+                quiz_data = load_quiz(quiz_date)
+                total_questions = len(quiz_data) if quiz_data else 0
+                correct_count = 0
+                
+                for q_num_str, user_answer in answers.items():
+                    q_num = int(q_num_str)
+                    q = quiz_data.get(str(q_num)) if quiz_data else None
+                    if q and q['correct_answer'] == user_answer:
+                        correct_count += 1
+                
+                # Редактируем сообщение с результатами (убираем клавиатуру)
+                result_text = (
+                    f"🎯 <b>Квиз завершен!</b>\n\n"
+                    f"📊 Ты ответил правильно на <b>{correct_count} из {total_questions}</b> вопросов.\n\n"
+                )
+                
+                if correct_count == total_questions:
+                    result_text += "🌟 <b>Отлично! Все ответы верные!</b>"
+                elif correct_count >= QUIZ_MIN_CORRECT_ANSWERS:
+                    result_text += f"✅ <b>Отличный результат!</b> Ты получил билетик!"
+                else:
+                    result_text += "Не расстраивайся! В следующем квизе все получится!"
+                
+                try:
+                    await cb.bot.edit_message_text(
+                        chat_id=user_id,
+                        message_id=participant.message_id,
+                        text=result_text,
+                        parse_mode="HTML",
+                        reply_markup=None  # Убираем клавиатуру
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка при редактировании сообщения с результатами квиза: {e}", exc_info=True)
+                
+                # Подсчитываем результаты и обрабатываем награды
+                await finish_quiz(bot, user_id, quiz_date, answers, question)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обработке ответа на вопрос квиза: {e}", exc_info=True)
+        await cb.answer("❌ Ошибка при обработке ответа", show_alert=True)
+
+
+async def finish_quiz(bot, user_id: int, quiz_date: str, answers: dict, last_question: dict):
+    """Завершает квиз и обрабатывает результаты"""
+    try:
+        # Загружаем все вопросы квиза
+        quiz_data = load_quiz(quiz_date)
+        if not quiz_data:
+            logger.error(f"Не удалось загрузить квиз для даты {quiz_date}")
+            return
+        
+        total_questions = len(quiz_data)
+        correct_count = 0
+        wrong_answers = []  # Список неправильных ответов: [(номер, вопрос, ответ пользователя, правильный ответ, текст правильного ответа)]
+        
+        # Подсчитываем правильные ответы и собираем неправильные
+        for q_num_str, user_answer in answers.items():
+            q_num = int(q_num_str)
+            question = quiz_data.get(str(q_num))
+            if question:
+                if question['correct_answer'] == user_answer:
+                    correct_count += 1
+                else:
+                    # Неправильный ответ - сохраняем информацию
+                    correct_answer_key = question['correct_answer']
+                    correct_answer_text = question['options'].get(correct_answer_key, correct_answer_key)
+                    user_answer_text = question['options'].get(user_answer, user_answer)
+                    wrong_answers.append((
+                        q_num,
+                        question['question'],
+                        user_answer_text,
+                        correct_answer_text
+                    ))
+        
+        # Получаем информацию о пользователе
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = result.scalar_one_or_none()
+            username = user.username if user else None
+        
+        # Сохраняем результат
+        async with AsyncSessionLocal() as session:
+            if correct_count >= QUIZ_MIN_CORRECT_ANSWERS:
+                # >= 3/5 - выдаем билетик
+                ticket_number = await get_next_ticket_number()
+                
+                # Отправляем картинку с билетиком
+                ticket_path = Path("data/билет.png")
+                if ticket_path.exists():
+                    caption = f"№{ticket_number}"
+                    try:
+                        # Открываем файл и отправляем через InputFile
+                        photo_file = FSInputFile(str(ticket_path.absolute()))
+                        photo_sent = await safe_send_photo(bot, user_id, photo_file, caption=caption)
+                        if not photo_sent:
+                            # Если не удалось отправить фото, отправляем текстовое сообщение
+                            logger.warning(f"Не удалось отправить фото билетика пользователю {user_id}, отправляем текст")
+                            await safe_send_message(
+                                bot, user_id,
+                                f"№{ticket_number}"
+                            )
+                    except Exception as e:
+                        logger.error(f"Ошибка при отправке фото билетика пользователю {user_id}: {e}", exc_info=True)
+                        await safe_send_message(
+                            bot, user_id,
+                            f"№{ticket_number}"
+                        )
+                else:
+                    logger.warning(f"Файл билет.png не найден по пути {ticket_path.absolute()}")
+                    await safe_send_message(
+                        bot, user_id,
+                        f"№{ticket_number}"
+                    )
+                
+                # Уведомляем админов
+                admin_message = (
+                    f"🎯 Пользователь с ID {user_id}"
+                    + (f" @{username}" if username else "")
+                    + f" ответил на {correct_count}/{total_questions} вопросов правильно "
+                    f"и получил лотерейный билетик №{ticket_number}"
+                )
+                for admin_id in ADMIN_IDS:
+                    await safe_send_message(bot, admin_id, admin_message)
+                
+                result = QuizResult(
+                    user_id=user_id,
+                    username=username,
+                    quiz_date=quiz_date,
+                    correct_answers=correct_count,
+                    total_questions=total_questions,
+                    ticket_number=ticket_number,
+                    completed_at=datetime.utcnow()
+                )
+            else:
+                # Меньше 3 правильных ответов - отправляем детальное сообщение
+                if wrong_answers:
+                    message_text = "❌ К сожалению, ты ошибся в нескольких вопросах:\n\n"
+                    
+                    for q_num, question_text, user_answer_text, correct_answer_text in wrong_answers:
+                        message_text += (
+                            f"<b>№{q_num}</b> | {question_text}\n"
+                            f"Твой ответ: {user_answer_text}\n"
+                            f"Правильный ответ: {correct_answer_text}\n\n"
+                        )
+                    
+                    message_text += "💪 Уверен, в следующий раз получится ответить без ошибок!"
+                    await safe_send_message(bot, user_id, message_text, parse_mode="HTML")
+                
+                # Уведомляем админов
+                admin_message = (
+                    f"📊 Пользователь с ID {user_id}"
+                    + (f" @{username}" if username else "")
+                    + f" прошел квиз, но ответил на {correct_count}/{total_questions} правильных вопросов"
+                )
+                for admin_id in ADMIN_IDS:
+                    await safe_send_message(bot, admin_id, admin_message)
+                
+                result = QuizResult(
+                    user_id=user_id,
+                    username=username,
+                    quiz_date=quiz_date,
+                    correct_answers=correct_count,
+                    total_questions=total_questions,
+                    ticket_number=None,  # Прочерк
+                    completed_at=datetime.utcnow()
+                )
+            
+            session.add(result)
+            await session.commit()
+        
+        logger.info(f"Квиз завершен для пользователя {user_id}: {correct_count}/{total_questions}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при завершении квиза: {e}", exc_info=True)
+
+
 async def main():
     """Главная функция запуска бота"""
     try:
         await init_db()
+        # Выполняем безопасную миграцию для квизов
+        try:
+            from safe_migrate_quiz import migrate_quiz_tables
+            await migrate_quiz_tables()
+            logger.info("✅ Миграция квизов выполнена")
+        except Exception as e:
+            logger.warning(f"Ошибка при миграции квизов (возможно, таблицы уже существуют): {e}")
         # Выполняем безопасную миграцию для исправления структуры БД
         try:
             from safe_migrate_raffle import safe_migrate

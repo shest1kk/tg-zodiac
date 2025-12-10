@@ -53,6 +53,43 @@ class RaffleParticipant(Base):
     message_id = Column(BigInteger, nullable=True)  # ID сообщения с объявлением для редактирования
     announcement_time = Column(DateTime, nullable=True)  # Время отправки объявления о розыгрыше
 
+
+class Quiz(Base):
+    """Управление квизами"""
+    __tablename__ = "quizzes"
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True)
+    quiz_date = Column(String, nullable=False, unique=True)  # Дата квиза (YYYY-MM-DD)
+    is_active = Column(Boolean, default=True, nullable=False)  # Активен ли квиз
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)  # Время создания
+    announcement_time = Column(DateTime, nullable=True)  # Время отправки объявления о квизе
+
+
+class QuizParticipant(Base):
+    """Участники квиза"""
+    __tablename__ = "quiz_participants"
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, nullable=False)  # ID пользователя
+    quiz_date = Column(String, nullable=False)  # Дата квиза (YYYY-MM-DD)
+    started_at = Column(DateTime, nullable=True)  # Время нажатия "Я готов"
+    current_question = Column(Integer, default=0, nullable=False)  # Текущий вопрос (0 = не начат)
+    answers = Column(String, nullable=True)  # JSON строка с ответами: {"1": "A", "2": "B", ...}
+    completed = Column(Boolean, default=False, nullable=False)  # Завершен ли квиз
+    message_id = Column(BigInteger, nullable=True)  # ID сообщения с объявлением для редактирования
+    announcement_time = Column(DateTime, nullable=True)  # Время отправки объявления о квизе
+
+
+class QuizResult(Base):
+    """Результаты квизов"""
+    __tablename__ = "quiz_results"
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, nullable=False)  # ID пользователя
+    username = Column(String, nullable=True)  # Username пользователя
+    quiz_date = Column(String, nullable=False)  # Дата квиза (YYYY-MM-DD)
+    correct_answers = Column(Integer, nullable=False)  # Количество правильных ответов
+    total_questions = Column(Integer, nullable=False)  # Всего вопросов
+    ticket_number = Column(Integer, nullable=True)  # Номер билетика (если 5/5) или NULL
+    completed_at = Column(DateTime, default=datetime.utcnow, nullable=False)  # Время завершения
+
 # Настройка engine с улучшенными параметрами
 engine = create_async_engine(
     DATABASE_URL,
