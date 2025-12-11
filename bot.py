@@ -1613,9 +1613,12 @@ async def choose_zodiac(cb: types.CallbackQuery):
                 zodiac_name = ZODIAC_NAMES.get(zid, f"Знак #{zid}")
                 
                 is_new_user = False
+                was_new_or_no_zodiac = False  # Флаг: был ли пользователь новым или без знака зодиака
+                
                 if not user:
                     # Создаем нового пользователя с датой регистрации
                     is_new_user = True
+                    was_new_or_no_zodiac = True  # Новый пользователь = точно нужно проверить квиз
                     user = User(
                         id=cb.from_user.id,
                         username=cb.from_user.username,
@@ -1628,6 +1631,17 @@ async def choose_zodiac(cb: types.CallbackQuery):
                     session.add(user)
                     logger.info(f"Создан новый пользователь {cb.from_user.id} со знаком {zodiac_name}")
                 else:
+                    # Проверяем, был ли у пользователя знак зодиака до этого
+                    old_zodiac = user.zodiac
+                    had_zodiac_before = (user.zodiac is not None and user.zodiac > 0)
+                    was_new_or_no_zodiac = not had_zodiac_before
+                    
+                    logger.info(
+                        f"Пользователь {cb.from_user.id} выбирает знак {zodiac_name}. "
+                        f"Старый знак: {old_zodiac}, был знак: {had_zodiac_before}, "
+                        f"was_new_or_no_zodiac={was_new_or_no_zodiac}"
+                    )
+                    
                     # Обновляем знак зодиака
                     user.zodiac = zid
                     user.zodiac_name = zodiac_name
@@ -1685,8 +1699,15 @@ async def choose_zodiac(cb: types.CallbackQuery):
                     except Exception as e:
                         logger.error(f"Ошибка при отправке текущего прогноза: {e}")
                 
-                # Если это новый пользователь, проверяем, нужно ли отправить объявление о квизе
-                if is_new_user:
+                # Если это новый пользователь или пользователь только что выбрал знак зодиака, проверяем, нужно ли отправить объявление о квизе
+                should_check_quiz = is_new_user or was_new_or_no_zodiac
+                logger.info(
+                    f"Проверка квиза для пользователя {cb.from_user.id}: "
+                    f"is_new_user={is_new_user}, was_new_or_no_zodiac={was_new_or_no_zodiac}, "
+                    f"should_check_quiz={should_check_quiz}"
+                )
+                
+                if should_check_quiz:
                     try:
                         from quiz import QUIZ_HOUR, QUIZ_MINUTE, QUIZ_PARTICIPATION_WINDOW, QUIZ_START_DATE, QUIZ_END_DATE
                         from quiz import send_quiz_announcement, get_quiz
@@ -1707,10 +1728,25 @@ async def choose_zodiac(cb: types.CallbackQuery):
                             
                             quiz_end_time = quiz_start_time + timedelta(hours=QUIZ_PARTICIPATION_WINDOW)
                             
+                            logger.debug(
+                                f"Проверка квиза для нового пользователя {cb.from_user.id}: "
+                                f"текущее время {current_time_moscow.strftime('%H:%M:%S')}, "
+                                f"начало квиза {quiz_start_time.strftime('%H:%M:%S')}, "
+                                f"окончание {quiz_end_time.strftime('%H:%M:%S')}"
+                            )
+                            
                             # Проверяем, что текущее время между началом и окончанием квиза
                             if quiz_start_time <= current_time_moscow < quiz_end_time:
-                                # Проверяем, существует ли квиз на сегодня и активен ли он
-                                quiz = await get_quiz(current_date_str)
+                                # Создаем или получаем квиз (создаст, если не существует)
+                                from quiz import create_or_get_quiz
+                                quiz = await create_or_get_quiz(current_date_str)
+                                
+                                logger.debug(
+                                    f"Квиз для {current_date_str}: существует={quiz is not None}, "
+                                    f"активен={quiz.is_active if quiz else False}"
+                                )
+                                
+                                # Если квиз существует и активен, отправляем объявление
                                 if quiz and quiz.is_active:
                                     # Отправляем объявление о квизе
                                     success = await send_quiz_announcement(
@@ -1721,7 +1757,20 @@ async def choose_zodiac(cb: types.CallbackQuery):
                                         is_automatic=False
                                     )
                                     if success:
-                                        logger.info(f"Отправлено объявление о квизе новому пользователю {cb.from_user.id} после регистрации")
+                                        logger.info(f"✅ Отправлено объявление о квизе новому пользователю {cb.from_user.id} после регистрации")
+                                    else:
+                                        logger.warning(f"❌ Не удалось отправить объявление о квизе новому пользователю {cb.from_user.id}")
+                                else:
+                                    logger.warning(
+                                        f"⚠️ Квиз для {current_date_str} не активен или не найден для нового пользователя {cb.from_user.id}. "
+                                        f"Quiz exists: {quiz is not None}, is_active: {quiz.is_active if quiz else None}"
+                                    )
+                            else:
+                                logger.debug(
+                                    f"⏰ Время не подходит для отправки квиза новому пользователю {cb.from_user.id}: "
+                                    f"текущее время {current_time_moscow.strftime('%H:%M:%S')} не в диапазоне "
+                                    f"[{quiz_start_time.strftime('%H:%M:%S')}, {quiz_end_time.strftime('%H:%M:%S')})"
+                                )
                     except Exception as e:
                         logger.error(f"Ошибка при отправке объявления о квизе новому пользователю: {e}", exc_info=True)
             except SQLAlchemyError as e:
@@ -2872,8 +2921,11 @@ async def cmd_edit_quiz_question(message: types.Message):
         if len(parts) < 3:
             await message.answer(
                 "❌ Неверный формат. Используй:\n"
+                "<code>/edit_quiz_question ДАТА ID Вопрос | 1:Вариант 1 | 2:Вариант 2 | 3:Вариант 3 | 4:Вариант 4 | Правильный ответ</code>\n\n"
+                "Или с буквенными ключами:\n"
                 "<code>/edit_quiz_question ДАТА ID Вопрос | A:Вариант A | Б:Вариант Б | В:Вариант В | Г:Вариант Г | Правильный ответ</code>\n\n"
-                "Пример:\n"
+                "Примеры:\n"
+                "<code>/edit_quiz_question 2025-12-12 1 Какая температура воды? | 1:+43+51С | 2:+18+22С | 3:+65С | 4:+21+50С | 2</code>\n"
                 "<code>/edit_quiz_question 2025-12-12 1 Какая температура воды? | A:+43+51С | Б:+18+22С | В:+65С | Г:+21+50С | Б</code>",
                 parse_mode="HTML"
             )
@@ -2897,23 +2949,42 @@ async def cmd_edit_quiz_question(message: types.Message):
         options = {}
         correct_answer = None
         
+        # Маппинг буквенных ключей на числовые (для совместимости)
+        letter_to_number = {"A": "1", "Б": "2", "В": "3", "Г": "4", "Д": "5"}
+        number_to_letter = {"1": "A", "2": "Б", "3": "В", "4": "Г", "5": "Д"}
+        
         # Парсим варианты ответов
         for segment in segments[1:5]:
             if ":" not in segment:
-                await message.answer(f"❌ Неверный формат варианта ответа: {segment}. Используй формат 'A:Текст'")
+                await message.answer(f"❌ Неверный формат варианта ответа: {segment}. Используй формат '1:Текст' или 'A:Текст'")
                 return
             key, value = segment.split(":", 1)
             key = key.strip()
             value = value.strip()
-            if key not in ["A", "Б", "В", "Г"]:
-                await message.answer(f"❌ Неверный ключ варианта: {key}. Используй A, Б, В или Г")
+            
+            # Поддерживаем как числовые, так и буквенные ключи
+            if key in letter_to_number:
+                # Буквенный ключ - преобразуем в числовой
+                numeric_key = letter_to_number[key]
+            elif key in ["1", "2", "3", "4", "5"]:
+                # Уже числовой ключ
+                numeric_key = key
+            else:
+                await message.answer(f"❌ Неверный ключ варианта: {key}. Используй 1-5 или A-Д")
                 return
-            options[key] = value
+            
+            options[numeric_key] = value
         
         # Правильный ответ
-        correct_answer = segments[5].strip()
-        if correct_answer not in ["A", "Б", "В", "Г"]:
-            await message.answer(f"❌ Неверный правильный ответ: {correct_answer}. Используй A, Б, В или Г")
+        correct_answer_raw = segments[5].strip()
+        if correct_answer_raw in letter_to_number:
+            # Буквенный ключ - преобразуем в числовой
+            correct_answer = letter_to_number[correct_answer_raw]
+        elif correct_answer_raw in ["1", "2", "3", "4", "5"]:
+            # Уже числовой ключ
+            correct_answer = correct_answer_raw
+        else:
+            await message.answer(f"❌ Неверный правильный ответ: {correct_answer_raw}. Используй 1-5 или A-Д")
             return
         
         if not question_text:
@@ -2953,12 +3024,16 @@ async def cmd_edit_quiz_question(message: types.Message):
             except:
                 date_display = quiz_date
             
-            options_text = "\n".join([f"{k}: {v}" for k, v in sorted(options.items())])
+            # Показываем варианты с буквенными ключами для удобства
+            number_to_letter = {"1": "A", "2": "Б", "3": "В", "4": "Г", "5": "Д"}
+            options_text = "\n".join([f"{number_to_letter.get(k, k)}: {v}" for k, v in sorted(options.items())])
+            correct_answer_display = number_to_letter.get(correct_answer, correct_answer)
+            
             await message.answer(
                 f"✅ Вопрос #{question_id} для {date_display} успешно обновлен!\n\n"
                 f"<b>Вопрос:</b> {question_text}\n\n"
                 f"<b>Варианты ответов:</b>\n{options_text}\n\n"
-                f"<b>Правильный ответ:</b> {correct_answer}",
+                f"<b>Правильный ответ:</b> {correct_answer_display} ({correct_answer})",
                 parse_mode="HTML"
             )
         else:
@@ -3875,13 +3950,20 @@ async def start_quiz_question(bot, user_id: int, quiz_date: str, question_num: i
         total_questions = get_total_questions(quiz_date)
         # Экранируем HTML-символы в тексте вопроса
         question_escaped = html.escape(question['question'])
-        question_text = f"❓ <b>Вопрос {question_num}/{total_questions}</b>\n\n{question_escaped}"
+        question_text = f"❓ <b>Вопрос {question_num}/{total_questions}</b>\n\n{question_escaped}\n\n"
         
-        # Создаем кнопки с вариантами ответов
+        # Добавляем варианты ответов в текст списком
+        question_text += "<b>Варианты ответов:</b>\n"
+        for option_key, option_text in sorted(question['options'].items()):
+            option_text_escaped = html.escape(str(option_text))
+            question_text += f"{option_key}. {option_text_escaped}\n"
+        
+        # Создаем кнопки с вариантами ответов (по одной в ряд)
         buttons = []
-        for option_key, option_text in question['options'].items():
+        for option_key, option_text in sorted(question['options'].items()):
+            # На кнопках показываем только номер/букву варианта, так как полный текст уже в сообщении
             buttons.append([types.InlineKeyboardButton(
-                text=f"{option_key}. {option_text}",
+                text=f"Вариант {option_key}",
                 callback_data=f"quiz_answer_{quiz_date}_{question_num}_{option_key}"
             )])
         

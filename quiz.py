@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
 # Настройки квизов
-QUIZ_HOUR = 12 # 12:00 МСК
-QUIZ_MINUTE = 0
+QUIZ_HOUR = 20 # 12:00 МСК
+QUIZ_MINUTE = 16
 QUIZ_PARTICIPATION_WINDOW = 6  # 6 часов на участие (до 18:00)
 QUIZ_REMINDER_DELAY = 3  # 3 часа до напоминания (в 15:00)
 QUIZ_ANSWER_TIME = 15  # 15 минут на ответ на весь квиз
