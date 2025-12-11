@@ -2917,8 +2917,8 @@ async def cmd_edit_quiz_question(message: types.Message):
         return
     
     try:
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 3:
+        parts = message.text.split(maxsplit=3)
+        if len(parts) < 4:
             await message.answer(
                 "❌ Неверный формат. Используй:\n"
                 "<code>/edit_quiz_question ДАТА ID Вопрос | 1:Вариант 1 | 2:Вариант 2 | 3:Вариант 3 | 4:Вариант 4 | Правильный ответ</code>\n\n"
