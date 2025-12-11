@@ -221,18 +221,40 @@ async def cmd_my_info(message: types.Message):
             subscribed_status = "✅ Подписан" if user.subscribed else "❌ Не подписан"
             created_at_str = user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else "Неизвестно"
             
+            # Получаем билетики из квизов
+            tickets_result = await session.execute(
+                select(QuizResult).where(
+                    and_(
+                        QuizResult.user_id == user.id,
+                        QuizResult.ticket_number.isnot(None)
+                    )
+                ).order_by(QuizResult.ticket_number.asc())
+            )
+            tickets = tickets_result.scalars().all()
+            
             text = (
                 f"👤 <b>Информация о тебе:</b>\n\n"
                 f"🆔 ID: {user.id}\n"
                 f"👤 Имя: {user.first_name or 'Не указано'}\n"
                 f"⭐ Знак зодиака: {zodiac_name}\n"
                 f"📬 Статус: {subscribed_status}\n"
-                f"📅 Дата регистрации: {created_at_str}"
+                f"📅 Дата регистрации: {created_at_str}\n\n"
             )
+            
+            # Добавляем информацию о билетиках
+            if tickets:
+                ticket_numbers = [str(t.ticket_number) for t in tickets]
+                text += (
+                    f"🎫 <b>Лотерейные билетики:</b> {len(tickets)}\n"
+                    f"Номера: {', '.join(ticket_numbers)}"
+                )
+            else:
+                text += "🎫 <b>Лотерейные билетики:</b> 0"
+            
             await message.answer(text, parse_mode="HTML")
             
     except Exception as e:
-        logger.error(f"Ошибка при обработке /my_info: {e}")
+        logger.error(f"Ошибка при обработке /my_info: {e}", exc_info=True)
         await message.answer("Произошла ошибка. Попробуй позже.")
 
 def is_admin(user_id: int) -> bool:
@@ -1590,14 +1612,16 @@ async def choose_zodiac(cb: types.CallbackQuery):
                 user = await session.get(User, cb.from_user.id)
                 zodiac_name = ZODIAC_NAMES.get(zid, f"Знак #{zid}")
                 
+                is_new_user = False
                 if not user:
                     # Создаем нового пользователя с датой регистрации
+                    is_new_user = True
                     user = User(
                         id=cb.from_user.id,
                         username=cb.from_user.username,
                         first_name=cb.from_user.first_name,
                         zodiac=zid,
-                        zodiac_name=zodiac_name,
+                        zodiac_name= zodiac_name,
                         subscribed=True,
                         created_at=datetime.utcnow()
                     )
@@ -1660,6 +1684,46 @@ async def choose_zodiac(cb: types.CallbackQuery):
                             logger.info(f"Отправлен текущий прогноз пользователю {cb.from_user.id} после выбора знака")
                     except Exception as e:
                         logger.error(f"Ошибка при отправке текущего прогноза: {e}")
+                
+                # Если это новый пользователь, проверяем, нужно ли отправить объявление о квизе
+                if is_new_user:
+                    try:
+                        from quiz import QUIZ_HOUR, QUIZ_MINUTE, QUIZ_PARTICIPATION_WINDOW, QUIZ_START_DATE, QUIZ_END_DATE
+                        from quiz import send_quiz_announcement, get_quiz
+                        from datetime import time as dt_time
+                        
+                        # Получаем текущую дату в МСК
+                        moscow_tz = timezone(timedelta(hours=3))
+                        current_time_moscow = datetime.now(moscow_tz)
+                        current_date_str = current_time_moscow.strftime("%Y-%m-%d")
+                        
+                        # Проверяем, входит ли текущая дата в диапазон квизов
+                        if QUIZ_START_DATE <= current_date_str <= QUIZ_END_DATE:
+                            # Вычисляем время начала и окончания квиза
+                            quiz_start_time = datetime.combine(
+                                current_time_moscow.date(),
+                                dt_time(hour=QUIZ_HOUR, minute=QUIZ_MINUTE)
+                            ).replace(tzinfo=moscow_tz)
+                            
+                            quiz_end_time = quiz_start_time + timedelta(hours=QUIZ_PARTICIPATION_WINDOW)
+                            
+                            # Проверяем, что текущее время между началом и окончанием квиза
+                            if quiz_start_time <= current_time_moscow < quiz_end_time:
+                                # Проверяем, существует ли квиз на сегодня и активен ли он
+                                quiz = await get_quiz(current_date_str)
+                                if quiz and quiz.is_active:
+                                    # Отправляем объявление о квизе
+                                    success = await send_quiz_announcement(
+                                        bot,
+                                        cb.from_user.id,
+                                        current_date_str,
+                                        force_send=True,
+                                        is_automatic=False
+                                    )
+                                    if success:
+                                        logger.info(f"Отправлено объявление о квизе новому пользователю {cb.from_user.id} после регистрации")
+                    except Exception as e:
+                        logger.error(f"Ошибка при отправке объявления о квизе новому пользователю: {e}", exc_info=True)
             except SQLAlchemyError as e:
                 await session.rollback()
                 logger.error(f"Ошибка БД при выборе знака: {e}")
@@ -3809,7 +3873,9 @@ async def start_quiz_question(bot, user_id: int, quiz_date: str, question_num: i
         
         # Формируем текст вопроса
         total_questions = get_total_questions(quiz_date)
-        question_text = f"❓ <b>Вопрос {question_num}/{total_questions}</b>\n\n{question['question']}"
+        # Экранируем HTML-символы в тексте вопроса
+        question_escaped = html.escape(question['question'])
+        question_text = f"❓ <b>Вопрос {question_num}/{total_questions}</b>\n\n{question_escaped}"
         
         # Создаем кнопки с вариантами ответов
         buttons = []
@@ -4076,10 +4142,15 @@ async def finish_quiz(bot, user_id: int, quiz_date: str, answers: dict, last_que
                     message_text = "❌ К сожалению, ты ошибся в нескольких вопросах:\n\n"
                     
                     for q_num, question_text, user_answer_text, correct_answer_text in wrong_answers:
+                        # Экранируем HTML-символы для безопасного отображения
+                        question_text_escaped = html.escape(question_text)
+                        user_answer_text_escaped = html.escape(str(user_answer_text))
+                        correct_answer_text_escaped = html.escape(str(correct_answer_text))
+                        
                         message_text += (
-                            f"<b>№{q_num}</b> | {question_text}\n"
-                            f"Твой ответ: {user_answer_text}\n"
-                            f"Правильный ответ: {correct_answer_text}\n\n"
+                            f"<b>№{q_num}</b> | {question_text_escaped}\n"
+                            f"Твой ответ: {user_answer_text_escaped}\n"
+                            f"Правильный ответ: {correct_answer_text_escaped}\n\n"
                         )
                     
                     message_text += "💪 Уверен, в следующий раз получится ответить без ошибок!"
