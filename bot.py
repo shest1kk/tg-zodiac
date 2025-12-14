@@ -9,6 +9,9 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import FSInputFile
 from aiogram.filters import Command
 from aiogram.types import BotCommand
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import select, and_, func
@@ -37,7 +40,8 @@ from quiz import (
 )
 
 bot = Bot(TG_TOKEN)
-dp = Dispatcher()
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
 # Хранилище для отслеживания режима отправки вопроса
 user_question_mode = {}
@@ -47,6 +51,28 @@ admin_reply_mode = {}
 
 # Хранилище для отслеживания участников розыгрыша (user_id -> raffle_date)
 raffle_participants = {}
+
+# FSM состояния для регистрации
+class RegistrationStates(StatesGroup):
+    waiting_for_status = State()  # Ожидание выбора статуса
+    waiting_for_source = State()  # Ожидание источника информации (для "Другое")
+    waiting_for_first_name = State()  # Ожидание имени
+    waiting_for_last_name = State()  # Ожидание фамилии
+    waiting_for_position = State()  # Ожидание должности (для действующих)
+    waiting_for_department = State()  # Ожидание подразделения (для действующих)
+    waiting_for_city = State()  # Ожидание города (для бывших)
+
+# ----------------- Validation -----------------
+def is_cyrillic_only(text: str) -> bool:
+    """Проверяет, что текст содержит только кириллицу (без цифр и других символов)"""
+    if not text:
+        return False
+    # Кириллица: от А (U+0410) до Я (U+044F), включая Ё (U+0401) и ё (U+0451)
+    # Также пробелы и дефисы для составных имен
+    for char in text:
+        if not (('\u0400' <= char <= '\u04FF') or char in ' -'):
+            return False
+    return True
 
 # ----------------- Keyboard -----------------
 def zodiac_keyboard():
@@ -69,6 +95,15 @@ def zodiac_keyboard():
             types.InlineKeyboardButton(text="♒ Водолей", callback_data="z_11"),
             types.InlineKeyboardButton(text="♓ Рыбы", callback_data="z_12"),
         ]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+
+def registration_status_keyboard():
+    """Клавиатура для выбора статуса регистрации"""
+    inline_keyboard = [
+        [types.InlineKeyboardButton(text="Действующий сотрудник", callback_data="reg_status_current")],
+        [types.InlineKeyboardButton(text="Ранее работал в компании", callback_data="reg_status_former")],
+        [types.InlineKeyboardButton(text="Другое", callback_data="reg_status_other")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
 
@@ -176,11 +211,13 @@ async def cmd_help(message: types.Message):
             "<b>/stats</b> - Статистика бота\n"
             "<b>/reply</b> - Ответить пользователю\n"
             "<b>/broadcast</b> - Массовая рассылка\n"
-            "<b>/test_send</b> - Тестовая отправка\n"
             "<b>/set_prediction</b> - Редактировать предсказания\n"
             "<b>/add_ticket</b> - Выдать билет пользователю\n"
             "<b>/check</b> - Проверить информацию о пользователе\n"
-            "<b>/users</b> - Экспорт списка пользователей в CSV"
+            "<b>/users</b> - Экспорт списка пользователей в CSV\n"
+            "<b>/registered</b> - Список зарегистрированных пользователей\n"
+            "<b>/export_registered</b> - Экспорт зарегистрированных в CSV\n"
+            "<b>/send_registration</b> - Рассылка регистрации"
         )
     
     await message.answer(help_text, parse_mode="HTML")
@@ -262,6 +299,187 @@ async def cmd_my_info(message: types.Message):
         logger.error(f"Ошибка при обработке /my_info: {e}", exc_info=True)
         await message.answer("Произошла ошибка. Попробуй позже.")
 
+# ----------------- Registration Handlers -----------------
+@dp.callback_query(F.data == "registration_start")
+async def registration_start(cb: types.CallbackQuery, state: FSMContext):
+    """Начало регистрации - показываем выбор статуса"""
+    await cb.answer()
+    
+    # Проверяем, не завершена ли уже регистрация
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, cb.from_user.id)
+        if user and user.registration_completed:
+            await cb.message.answer("✅ Ты уже зарегистрирован! Регистрация не требуется.")
+            return
+    
+    await state.set_state(RegistrationStates.waiting_for_status)
+    await cb.message.answer(
+        "Определи свой статус:",
+        reply_markup=registration_status_keyboard()
+    )
+
+@dp.callback_query(F.data.startswith("reg_status_"))
+async def registration_status_selected(cb: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора статуса регистрации"""
+    await cb.answer()
+    
+    # Проверяем, не завершена ли уже регистрация
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, cb.from_user.id)
+        if not user:
+            await cb.message.answer("❌ Ошибка: пользователь не найден. Используй /start")
+            await state.clear()
+            return
+        
+        if user.registration_completed:
+            await cb.message.answer("✅ Ты уже зарегистрирован! Регистрация не требуется.")
+            await state.clear()
+            return
+        
+        status = cb.data.replace("reg_status_", "")
+        user.registration_status = status
+        await session.commit()
+    
+    if status == "other":
+        await state.set_state(RegistrationStates.waiting_for_source)
+        await cb.message.answer("Как ты узнал о компании?")
+    elif status == "current":
+        await state.set_state(RegistrationStates.waiting_for_first_name)
+        await cb.message.answer("Введи своё имя (только кириллица, без цифр):")
+    elif status == "former":
+        await state.set_state(RegistrationStates.waiting_for_first_name)
+        await cb.message.answer("Введи своё имя (только кириллица, без цифр):")
+    else:
+        await state.clear()
+        await cb.message.answer("❌ Неизвестный статус")
+
+@dp.message(RegistrationStates.waiting_for_source)
+async def registration_source(message: types.Message, state: FSMContext):
+    """Обработка источника информации (для статуса 'Другое')"""
+    source = message.text.strip()
+    
+    if not source:
+        await message.answer("❌ Пожалуйста, введи текст. Как ты узнал о компании?")
+        return
+    
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, message.from_user.id)
+        if user:
+            user.registration_source = source
+            user.registration_completed = True
+            await session.commit()
+            logger.info(f"Пользователь {message.from_user.id} завершил регистрацию (статус: Другое)")
+    
+    await state.clear()
+    await message.answer("✅ Регистрация завершена! Спасибо за информацию.")
+
+@dp.message(RegistrationStates.waiting_for_first_name)
+async def registration_first_name(message: types.Message, state: FSMContext):
+    """Обработка ввода имени"""
+    first_name = message.text.strip()
+    
+    if not is_cyrillic_only(first_name):
+        await message.answer("❌ Имя должно содержать только кириллицу (без цифр и других символов). Попробуй еще раз:")
+        return
+    
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, message.from_user.id)
+        if user:
+            user.registration_first_name = first_name
+            await session.commit()
+    
+    await state.set_state(RegistrationStates.waiting_for_last_name)
+    await message.answer("Введи свою фамилию (только кириллица, без цифр):")
+
+@dp.message(RegistrationStates.waiting_for_last_name)
+async def registration_last_name(message: types.Message, state: FSMContext):
+    """Обработка ввода фамилии"""
+    last_name = message.text.strip()
+    
+    if not is_cyrillic_only(last_name):
+        await message.answer("❌ Фамилия должна содержать только кириллицу (без цифр и других символов). Попробуй еще раз:")
+        return
+    
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user:
+            await message.answer("❌ Ошибка: пользователь не найден")
+            await state.clear()
+            return
+        
+        user.registration_last_name = last_name
+        await session.commit()
+        
+        # Определяем следующий шаг в зависимости от статуса
+        if user.registration_status == "current":
+            await state.set_state(RegistrationStates.waiting_for_position)
+            await message.answer("Введи свою должность:")
+        elif user.registration_status == "former":
+            await state.set_state(RegistrationStates.waiting_for_city)
+            await message.answer("Введи свой город (только кириллица, без цифр):")
+        else:
+            await state.clear()
+            await message.answer("❌ Ошибка: неизвестный статус регистрации")
+
+@dp.message(RegistrationStates.waiting_for_position)
+async def registration_position(message: types.Message, state: FSMContext):
+    """Обработка ввода должности (для действующих сотрудников)"""
+    position = message.text.strip()
+    
+    if not position:
+        await message.answer("❌ Пожалуйста, введи должность:")
+        return
+    
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, message.from_user.id)
+        if user:
+            user.registration_position = position
+            await session.commit()
+    
+    await state.set_state(RegistrationStates.waiting_for_department)
+    await message.answer("Введи подразделение (название ресторана, отдела):")
+
+@dp.message(RegistrationStates.waiting_for_department)
+async def registration_department(message: types.Message, state: FSMContext):
+    """Обработка ввода подразделения (для действующих сотрудников)"""
+    department = message.text.strip()
+    
+    if not department:
+        await message.answer("❌ Пожалуйста, введи подразделение:")
+        return
+    
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, message.from_user.id)
+        if user:
+            user.registration_department = department
+            user.registration_completed = True
+            await session.commit()
+            logger.info(f"Пользователь {message.from_user.id} завершил регистрацию (статус: Действующий сотрудник)")
+    
+    await state.clear()
+    await message.answer("✅ Регистрация завершена! Спасибо за информацию.")
+
+@dp.message(RegistrationStates.waiting_for_city)
+async def registration_city(message: types.Message, state: FSMContext):
+    """Обработка ввода города (для бывших сотрудников)"""
+    city = message.text.strip()
+    
+    if not is_cyrillic_only(city):
+        await message.answer("❌ Город должен содержать только кириллицу (без цифр и других символов). Попробуй еще раз:")
+        return
+    
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, message.from_user.id)
+        if user:
+            user.registration_city = city
+            user.registration_completed = True
+            await session.commit()
+            logger.info(f"Пользователь {message.from_user.id} завершил регистрацию (статус: Ранее работал в компании)")
+    
+    await state.clear()
+    await message.answer("✅ Регистрация завершена! Спасибо за информацию.")
+
+# ----------------- Admin Functions -----------------
 def is_admin(user_id: int) -> bool:
     """Проверка, является ли пользователь администратором"""
     return ADMIN_IDS is not None and user_id in ADMIN_IDS
@@ -275,8 +493,7 @@ def admin_keyboard():
         [types.InlineKeyboardButton(text="🎁 Розыгрыш", callback_data="admin_raffle")],
         [types.InlineKeyboardButton(text="🎯 Квиз", callback_data="admin_quiz")],
         [types.InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users_list")],
-        [types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [types.InlineKeyboardButton(text="📤 Тестовая отправка", callback_data="admin_test_send")]
+        [types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")]
     ])
 
 @dp.message(Command("admin"))
@@ -1259,6 +1476,64 @@ async def cmd_reply(message: types.Message):
         logger.error(f"Ошибка при ответе пользователю: {e}")
         await message.answer(f"❌ Ошибка: {e}")
 
+@dp.message(Command("send_registration"))
+async def cmd_send_registration(message: types.Message):
+    """Рассылка сообщения о регистрации для участия в лотерее"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        registration_text = (
+            "Привет, дорогой друг! Для участия в лотереи, которая пройдет 25.12, нужно пройти регистрацию, чтобы твои билетики учлись!"
+        )
+        
+        registration_keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="Регистрация", callback_data="registration_start")]
+        ])
+        
+        await message.answer("⏳ Начинаю рассылку регистрации...")
+        
+        async with AsyncSessionLocal() as session:
+            # Получаем только тех пользователей, кто еще не прошел регистрацию
+            result = await session.execute(
+                select(User).where(
+                    (User.registration_completed == False) | (User.registration_completed.is_(None))
+                )
+            )
+            users = result.scalars().all()
+        
+        if not users:
+            await message.answer("❌ Нет незарегистрированных пользователей для рассылки")
+            return
+        
+        success_count = 0
+        error_count = 0
+        
+        for user in users:
+            success = await safe_send_message(
+                bot, 
+                user.id, 
+                registration_text, 
+                reply_markup=registration_keyboard
+            )
+            if success:
+                success_count += 1
+                await asyncio.sleep(RATE_LIMIT_DELAY)  # Throttling
+            else:
+                error_count += 1
+        
+        await message.answer(
+            f"✅ Рассылка регистрации завершена!\n\n"
+            f"✅ Успешно: {success_count}\n"
+            f"❌ Ошибок: {error_count}"
+        )
+        logger.info(f"Админ {message.from_user.id} выполнил рассылку регистрации: {success_count} успешно, {error_count} ошибок")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при рассылке регистрации: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
 @dp.message(Command("add_ticket"))
 async def cmd_add_ticket(message: types.Message):
     """Выдача билета пользователю администратором
@@ -1537,8 +1812,40 @@ async def cmd_check(message: types.Message):
                     text += f"\n... и еще {len(raffle_participants) - 10} розыгрышей"
             else:
                 text += "Не участвовал"
-        
-        await message.answer(text, parse_mode="HTML")
+            
+            # Информация о регистрации в лотерею
+            text += "\n\n"
+            if user.registration_completed:
+                text += "<b>📝 Регистрация в лотерею:</b> ✅ Завершена\n"
+                if user.registration_status == "current":
+                    text += "Статус: Действующий сотрудник\n"
+                    if user.registration_first_name:
+                        text += f"Имя: {user.registration_first_name}\n"
+                    if user.registration_last_name:
+                        text += f"Фамилия: {user.registration_last_name}\n"
+                    if user.registration_position:
+                        text += f"Должность: {user.registration_position}\n"
+                    if user.registration_department:
+                        text += f"Подразделение: {user.registration_department}\n"
+                elif user.registration_status == "former":
+                    text += "Статус: Ранее работал в компании\n"
+                    if user.registration_first_name:
+                        text += f"Имя: {user.registration_first_name}\n"
+                    if user.registration_last_name:
+                        text += f"Фамилия: {user.registration_last_name}\n"
+                    if user.registration_city:
+                        text += f"Город: {user.registration_city}\n"
+                elif user.registration_status == "other":
+                    text += "Статус: Другое\n"
+                    if user.registration_source:
+                        text += f"Источник информации: {user.registration_source}\n"
+            elif user.registration_status:
+                text += "<b>📝 Регистрация в лотерею:</b> ⏳ В процессе\n"
+                text += f"Статус: {user.registration_status}\n"
+            else:
+                text += "<b>📝 Регистрация в лотерею:</b> ❌ Не зарегистрирован\n"
+            
+            await message.answer(text, parse_mode="HTML")
         logger.info(f"Админ {message.from_user.id} проверил информацию о пользователе {user_id}")
         
     except ValueError:
@@ -1583,6 +1890,7 @@ async def cmd_users(message: types.Message):
                     'Знак зодиака',
                     'Подписан',
                     'Дата регистрации',
+                    'Зарегистрирован',
                     'Количество билетов (квизы)',
                     'Количество билетов (розыгрыши)',
                     'Всего билетов',
@@ -1635,6 +1943,7 @@ async def cmd_users(message: types.Message):
                         zodiac_name,
                         'Да' if user.subscribed else 'Нет',
                         user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else '',
+                        'Да' if user.registration_completed else 'Нет',
                         len(quiz_tickets),
                         len(raffle_tickets),
                         len(all_ticket_numbers),
@@ -1664,6 +1973,251 @@ async def cmd_users(message: types.Message):
         
     except Exception as e:
         logger.error(f"Ошибка при экспорте пользователей: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("registered"))
+async def cmd_registered(message: types.Message):
+    """Просмотр списка зарегистрированных пользователей
+    
+    Формат: /registered [статус]
+    Статусы: current, former, other, all (по умолчанию - все завершенные)
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split()
+        status_filter = parts[1] if len(parts) > 1 else None
+        
+        async with AsyncSessionLocal() as session:
+            # Получаем зарегистрированных пользователей
+            query = select(User).where(User.registration_completed == True)
+            
+            if status_filter and status_filter != "all":
+                query = query.where(User.registration_status == status_filter)
+            
+            query = query.order_by(User.created_at.desc())
+            
+            result = await session.execute(query)
+            users = result.scalars().all()
+            
+            if not users:
+                status_text = {
+                    "current": "действующих сотрудников",
+                    "former": "бывших сотрудников",
+                    "other": "с статусом 'Другое'",
+                    None: "зарегистрированных пользователей"
+                }.get(status_filter, "зарегистрированных пользователей")
+                await message.answer(f"❌ Нет {status_text}.")
+                return
+            
+            # Формируем список
+            text = f"📝 <b>Зарегистрированные пользователи</b>\n\n"
+            if status_filter:
+                status_names = {
+                    "current": "Действующие сотрудники",
+                    "former": "Ранее работали в компании",
+                    "other": "Другое"
+                }
+                text += f"Фильтр: {status_names.get(status_filter, status_filter)}\n\n"
+            
+            text += f"Всего: {len(users)}\n\n"
+            
+            for i, user in enumerate(users[:50], 1):  # Показываем первые 50
+                user_info = f"{i}. <b>ID: {user.id}</b>"
+                if user.username:
+                    user_info += f" @{user.username}"
+                if user.first_name:
+                    user_info += f" ({user.first_name})"
+                
+                text += user_info + "\n"
+                
+                # Добавляем информацию о регистрации
+                if user.registration_status == "current":
+                    reg_info = "  👤 Действующий сотрудник"
+                    if user.registration_first_name and user.registration_last_name:
+                        reg_info += f": {user.registration_first_name} {user.registration_last_name}"
+                    if user.registration_position:
+                        reg_info += f"\n  💼 {user.registration_position}"
+                    if user.registration_department:
+                        reg_info += f"\n  🏢 {user.registration_department}"
+                    text += reg_info + "\n"
+                elif user.registration_status == "former":
+                    reg_info = "  👤 Ранее работал в компании"
+                    if user.registration_first_name and user.registration_last_name:
+                        reg_info += f": {user.registration_first_name} {user.registration_last_name}"
+                    if user.registration_city:
+                        reg_info += f"\n  📍 {user.registration_city}"
+                    text += reg_info + "\n"
+                elif user.registration_status == "other":
+                    reg_info = "  👤 Другое"
+                    if user.registration_source:
+                        reg_info += f"\n  ℹ️ {user.registration_source[:50]}"
+                    text += reg_info + "\n"
+                
+                text += "\n"
+            
+            if len(users) > 50:
+                text += f"\n... и еще {len(users) - 50} пользователей"
+            
+            # Добавляем подсказку по фильтрам
+            text += "\n\n💡 <b>Фильтры:</b>\n"
+            text += "/registered current - действующие сотрудники\n"
+            text += "/registered former - бывшие сотрудники\n"
+            text += "/registered other - другое\n"
+            text += "/registered all - все зарегистрированные"
+            
+            await message.answer(text, parse_mode="HTML")
+            logger.info(f"Админ {message.from_user.id} просмотрел список зарегистрированных пользователей (фильтр: {status_filter or 'all'})")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре зарегистрированных пользователей: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("export_registered"))
+async def cmd_export_registered(message: types.Message):
+    """Экспорт зарегистрированных пользователей в CSV
+    
+    Формат: /export_registered [статус]
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split()
+        status_filter = parts[1] if len(parts) > 1 else None
+        
+        await message.answer("⏳ Формирую список зарегистрированных пользователей...")
+        
+        async with AsyncSessionLocal() as session:
+            # Получаем зарегистрированных пользователей
+            query = select(User).where(User.registration_completed == True)
+            
+            if status_filter and status_filter != "all":
+                query = query.where(User.registration_status == status_filter)
+            
+            query = query.order_by(User.created_at.desc())
+            
+            result = await session.execute(query)
+            users = result.scalars().all()
+            
+            if not users:
+                await message.answer("❌ Нет зарегистрированных пользователей для экспорта.")
+                return
+            
+            # Создаем временный файл для CSV
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8-sig', newline='', suffix='.csv', delete=False) as csv_file:
+                writer = csv.writer(csv_file, delimiter=';')
+                
+                # Заголовки
+                writer.writerow([
+                    'ID',
+                    'Username',
+                    'Имя (Telegram)',
+                    'Статус регистрации',
+                    'Имя (регистрация)',
+                    'Фамилия',
+                    'Должность',
+                    'Подразделение',
+                    'Город',
+                    'Источник информации',
+                    'Дата регистрации в боте',
+                    'Завершена регистрация',
+                    'Количество билетов (квизы)',
+                    'Количество билетов (розыгрыши)',
+                    'Всего билетов',
+                    'Номера билетов'
+                ])
+                
+                # Данные для каждого пользователя
+                for user in users:
+                    status_name = {
+                        "current": "Действующий сотрудник",
+                        "former": "Ранее работал в компании",
+                        "other": "Другое"
+                    }.get(user.registration_status, user.registration_status or "")
+                    
+                    # Получаем билеты из квизов
+                    quiz_tickets_result = await session.execute(
+                        select(QuizResult).where(
+                            and_(
+                                QuizResult.user_id == user.id,
+                                QuizResult.ticket_number.isnot(None)
+                            )
+                        ).order_by(QuizResult.ticket_number.asc())
+                    )
+                    quiz_tickets = quiz_tickets_result.scalars().all()
+                    
+                    # Получаем билеты из розыгрышей
+                    raffle_tickets_result = await session.execute(
+                        select(RaffleParticipant).where(
+                            and_(
+                                RaffleParticipant.user_id == user.id,
+                                RaffleParticipant.ticket_number.isnot(None)
+                            )
+                        ).order_by(RaffleParticipant.ticket_number.asc())
+                    )
+                    raffle_tickets = raffle_tickets_result.scalars().all()
+                    
+                    # Собираем все номера билетов
+                    all_ticket_numbers = []
+                    for ticket in quiz_tickets:
+                        all_ticket_numbers.append(ticket.ticket_number)
+                    for ticket in raffle_tickets:
+                        all_ticket_numbers.append(ticket.ticket_number)
+                    all_ticket_numbers.sort()
+                    
+                    # Формируем строку с номерами билетов
+                    tickets_str = ', '.join(map(str, all_ticket_numbers)) if all_ticket_numbers else ''
+                    
+                    writer.writerow([
+                        user.id,
+                        user.username or '',
+                        user.first_name or '',
+                        status_name,
+                        user.registration_first_name or '',
+                        user.registration_last_name or '',
+                        user.registration_position or '',
+                        user.registration_department or '',
+                        user.registration_city or '',
+                        user.registration_source or '',
+                        user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else '',
+                        'Да' if user.registration_completed else 'Нет',
+                        len(quiz_tickets),
+                        len(raffle_tickets),
+                        len(all_ticket_numbers),
+                        tickets_str
+                    ])
+                
+                csv_file_path = csv_file.name
+            
+            # Отправляем файл админу
+            try:
+                filter_suffix = f"_{status_filter}" if status_filter else "_all"
+                document = FSInputFile(
+                    csv_file_path, 
+                    filename=f"registered_users{filter_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                )
+                await bot.send_document(
+                    message.from_user.id,
+                    document,
+                    caption=f"📊 Список зарегистрированных пользователей\n\nВсего: {len(users)}"
+                )
+                logger.info(f"Админ {message.from_user.id} экспортировал список зарегистрированных пользователей ({len(users)} пользователей)")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке CSV файла: {e}", exc_info=True)
+                await message.answer(f"❌ Ошибка при отправке файла: {e}")
+            finally:
+                # Удаляем временный файл
+                try:
+                    Path(csv_file_path).unlink()
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить временный файл {csv_file_path}: {e}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при экспорте зарегистрированных пользователей: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка: {e}")
 
 @dp.callback_query(F.data == "admin_back")
@@ -4176,8 +4730,14 @@ async def cmd_deny(message: types.Message):
         await message.answer(f"❌ Ошибка: {e}")
 
 @dp.message()
-async def handle_unknown(message: types.Message):
+async def handle_unknown(message: types.Message, state: FSMContext):
     """Обработчик неизвестных команд и сообщений"""
+    # Проверяем, не находимся ли мы в процессе регистрации (FSM обрабатывает это автоматически)
+    current_state = await state.get_state()
+    if current_state:
+        # Если есть состояние FSM, не обрабатываем здесь - FSM обработчики имеют приоритет
+        return
+    
     # Сбрасываем флаг режима вопроса при любой команде
     if message.text and message.text.startswith("/"):
         user_question_mode.pop(message.from_user.id, None)
@@ -4411,6 +4971,9 @@ async def setup_bot_commands():
                 BotCommand(command="add_ticket", description="🎫 Выдать билет пользователю"),
                 BotCommand(command="check", description="🔍 Проверить информацию о пользователе"),
                 BotCommand(command="users", description="📊 Экспорт списка пользователей в CSV"),
+                BotCommand(command="registered", description="📝 Список зарегистрированных пользователей"),
+                BotCommand(command="export_registered", description="📥 Экспорт зарегистрированных в CSV"),
+                BotCommand(command="send_registration", description="📤 Рассылка регистрации"),
             ]
             for admin_id in ADMIN_IDS:
                 try:

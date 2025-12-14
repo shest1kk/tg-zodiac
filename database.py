@@ -26,6 +26,15 @@ class User(Base):
     zodiac_name = Column(String, nullable=True)  # Название знака зодиака
     subscribed = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)  # Дата первого запуска
+    # Поля для регистрации в лотерею
+    registration_status = Column(String, nullable=True)  # "current_employee", "former_employee", "other"
+    registration_first_name = Column(String, nullable=True)  # Имя для регистрации (кириллица)
+    registration_last_name = Column(String, nullable=True)  # Фамилия для регистрации (кириллица)
+    registration_position = Column(String, nullable=True)  # Должность (для действующих сотрудников)
+    registration_department = Column(String, nullable=True)  # Подразделение (для действующих сотрудников)
+    registration_city = Column(String, nullable=True)  # Город (для бывших сотрудников)
+    registration_source = Column(String, nullable=True)  # Источник информации (для "Другое")
+    registration_completed = Column(Boolean, default=False, nullable=False)  # Завершена ли регистрация
 
 
 class Raffle(Base):
