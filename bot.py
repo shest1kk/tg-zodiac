@@ -2952,22 +2952,31 @@ async def admin_quiz_date_menu(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("admin_quiz_participants_"))
 async def admin_quiz_participants(cb: types.CallbackQuery):
-    """Просмотр всех участников квиза"""
+    """Просмотр всех участников квиза с пагинацией"""
     if not is_admin(cb.from_user.id):
         await cb.answer("Доступ запрещен", show_alert=True)
         return
     
     try:
-        quiz_date = cb.data.split("_")[-1]
+        # Парсим callback_data: admin_quiz_participants_{quiz_date}_page_{page} или admin_quiz_participants_{quiz_date}
+        data_str = cb.data
+        if "_page_" in data_str:
+            quiz_date = data_str.replace("admin_quiz_participants_", "").split("_page_")[0]
+            page = int(data_str.split("_page_")[1])
+        else:
+            quiz_date = data_str.replace("admin_quiz_participants_", "")
+            page = 0
+        
+        ITEMS_PER_PAGE = 50
         
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 select(QuizParticipant).where(QuizParticipant.quiz_date == quiz_date)
             )
-            participants = result.scalars().all()
+            all_participants = result.scalars().all()
             
             # Получаем информацию о пользователях
-            user_ids = [p.user_id for p in participants]
+            user_ids = [p.user_id for p in all_participants]
             users_result = await session.execute(
                 select(User).where(User.id.in_(user_ids))
             )
@@ -2979,10 +2988,23 @@ async def admin_quiz_participants(cb: types.CallbackQuery):
         except:
             date_display = quiz_date
         
+        total_items = len(all_participants)
+        total_pages = (total_items + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE if total_items > 0 else 1
+        
+        if page < 0:
+            page = 0
+        if page >= total_pages:
+            page = total_pages - 1
+        
+        start_idx = page * ITEMS_PER_PAGE
+        end_idx = min(start_idx + ITEMS_PER_PAGE, total_items)
+        participants = all_participants[start_idx:end_idx]
+        
         text = f"👥 <b>Все участники квиза от {date_display}</b>\n\n"
+        text += f"Всего: {total_items} | Страница {page + 1}/{total_pages}\n\n"
         
         if participants:
-            for i, p in enumerate(participants, 1):  # Показываем всех участников
+            for i, p in enumerate(participants, start=start_idx + 1):
                 user = users.get(p.user_id)
                 username = f"@{user.username}" if user and user.username else ""
                 first_name = user.first_name if user and user.first_name else ""
@@ -2998,7 +3020,25 @@ async def admin_quiz_participants(cb: types.CallbackQuery):
         else:
             text += "Участников пока нет."
         
-        buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_quiz_date_{quiz_date}")]]
+        buttons = []
+        
+        # Кнопки навигации
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"admin_quiz_participants_{quiz_date}_page_{page - 1}"
+            ))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton(
+                text="Вперед ▶️",
+                callback_data=f"admin_quiz_participants_{quiz_date}_page_{page + 1}"
+            ))
+        if nav_buttons:
+            buttons.append(nav_buttons)
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад к квизу", callback_data=f"admin_quiz_date_{quiz_date}")])
+        
         await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
         await cb.answer()
         
@@ -3009,13 +3049,22 @@ async def admin_quiz_participants(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("admin_quiz_tickets_"))
 async def admin_quiz_tickets(cb: types.CallbackQuery):
-    """Просмотр тех, кто получил билетик"""
+    """Просмотр тех, кто получил билетик с пагинацией"""
     if not is_admin(cb.from_user.id):
         await cb.answer("Доступ запрещен", show_alert=True)
         return
     
     try:
-        quiz_date = cb.data.split("_")[-1]
+        # Парсим callback_data: admin_quiz_tickets_{quiz_date}_page_{page} или admin_quiz_tickets_{quiz_date}
+        data_str = cb.data
+        if "_page_" in data_str:
+            quiz_date = data_str.replace("admin_quiz_tickets_", "").split("_page_")[0]
+            page = int(data_str.split("_page_")[1])
+        else:
+            quiz_date = data_str.replace("admin_quiz_tickets_", "")
+            page = 0
+        
+        ITEMS_PER_PAGE = 50
         
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -3026,7 +3075,7 @@ async def admin_quiz_tickets(cb: types.CallbackQuery):
                     )
                 ).order_by(QuizResult.ticket_number.asc())
             )
-            results = result.scalars().all()
+            all_results = result.scalars().all()
         
         try:
             date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
@@ -3034,19 +3083,50 @@ async def admin_quiz_tickets(cb: types.CallbackQuery):
         except:
             date_display = quiz_date
         
+        total_items = len(all_results)
+        total_pages = (total_items + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE if total_items > 0 else 1
+        
+        if page < 0:
+            page = 0
+        if page >= total_pages:
+            page = total_pages - 1
+        
+        start_idx = page * ITEMS_PER_PAGE
+        end_idx = min(start_idx + ITEMS_PER_PAGE, total_items)
+        results = all_results[start_idx:end_idx]
+        
         text = f"🎫 <b>Получили билетик (квиз от {date_display})</b>\n\n"
+        text += f"Всего: {total_items} | Страница {page + 1}/{total_pages}\n\n"
         
         if results:
-            for i, r in enumerate(results, 1):  # Показываем всех участников
+            for i, r in enumerate(results, start=start_idx + 1):
                 user_info = f"<b>ID: {r.user_id}</b>"
                 if r.username:
                     user_info += f" @{r.username}"
                 
-                text += f"{i}. {user_info} - Билетик №{r.ticket_number} ({r.correct_answers}/{r.total_questions})\n"
+                text += f"{i}. {user_info} - Билетик №<b>{r.ticket_number}</b> ({r.correct_answers}/{r.total_questions})\n"
         else:
             text += "Никто еще не получил билетик."
         
-        buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_quiz_date_{quiz_date}")]]
+        buttons = []
+        
+        # Кнопки навигации
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"admin_quiz_tickets_{quiz_date}_page_{page - 1}"
+            ))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton(
+                text="Вперед ▶️",
+                callback_data=f"admin_quiz_tickets_{quiz_date}_page_{page + 1}"
+            ))
+        if nav_buttons:
+            buttons.append(nav_buttons)
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад к квизу", callback_data=f"admin_quiz_date_{quiz_date}")])
+        
         await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
         await cb.answer()
         
@@ -3057,13 +3137,22 @@ async def admin_quiz_tickets(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("admin_quiz_no_tickets_"))
 async def admin_quiz_no_tickets(cb: types.CallbackQuery):
-    """Просмотр тех, кто не получил билетик"""
+    """Просмотр тех, кто не получил билетик с пагинацией"""
     if not is_admin(cb.from_user.id):
         await cb.answer("Доступ запрещен", show_alert=True)
         return
     
     try:
-        quiz_date = cb.data.split("_")[-1]
+        # Парсим callback_data: admin_quiz_no_tickets_{quiz_date}_page_{page} или admin_quiz_no_tickets_{quiz_date}
+        data_str = cb.data
+        if "_page_" in data_str:
+            quiz_date = data_str.replace("admin_quiz_no_tickets_", "").split("_page_")[0]
+            page = int(data_str.split("_page_")[1])
+        else:
+            quiz_date = data_str.replace("admin_quiz_no_tickets_", "")
+            page = 0
+        
+        ITEMS_PER_PAGE = 50
         
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -3075,7 +3164,7 @@ async def admin_quiz_no_tickets(cb: types.CallbackQuery):
                     )
                 ).order_by(QuizResult.correct_answers.desc())
             )
-            results = result.scalars().all()
+            all_results = result.scalars().all()
         
         try:
             date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
@@ -3083,10 +3172,23 @@ async def admin_quiz_no_tickets(cb: types.CallbackQuery):
         except:
             date_display = quiz_date
         
+        total_items = len(all_results)
+        total_pages = (total_items + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE if total_items > 0 else 1
+        
+        if page < 0:
+            page = 0
+        if page >= total_pages:
+            page = total_pages - 1
+        
+        start_idx = page * ITEMS_PER_PAGE
+        end_idx = min(start_idx + ITEMS_PER_PAGE, total_items)
+        results = all_results[start_idx:end_idx]
+        
         text = f"❌ <b>Не получили билетик (квиз от {date_display})</b>\n\n"
+        text += f"Всего: {total_items} | Страница {page + 1}/{total_pages}\n\n"
         
         if results:
-            for i, r in enumerate(results, 1):  # Показываем всех участников
+            for i, r in enumerate(results, start=start_idx + 1):
                 user_info = f"<b>ID: {r.user_id}</b>"
                 if r.username:
                     user_info += f" @{r.username}"
@@ -3095,7 +3197,25 @@ async def admin_quiz_no_tickets(cb: types.CallbackQuery):
         else:
             text += "Все участники получили билетик или никто не прошел квиз."
         
-        buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_quiz_date_{quiz_date}")]]
+        buttons = []
+        
+        # Кнопки навигации
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"admin_quiz_no_tickets_{quiz_date}_page_{page - 1}"
+            ))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton(
+                text="Вперед ▶️",
+                callback_data=f"admin_quiz_no_tickets_{quiz_date}_page_{page + 1}"
+            ))
+        if nav_buttons:
+            buttons.append(nav_buttons)
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад к квизу", callback_data=f"admin_quiz_date_{quiz_date}")])
+        
         await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
         await cb.answer()
         
@@ -3106,13 +3226,22 @@ async def admin_quiz_no_tickets(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("admin_quiz_non_participants_"))
 async def admin_quiz_non_participants(cb: types.CallbackQuery):
-    """Просмотр тех, кто не принял участие"""
+    """Просмотр тех, кто не принял участие с пагинацией"""
     if not is_admin(cb.from_user.id):
         await cb.answer("Доступ запрещен", show_alert=True)
         return
     
     try:
-        quiz_date = cb.data.split("_")[-1]
+        # Парсим callback_data: admin_quiz_non_participants_{quiz_date}_page_{page} или admin_quiz_non_participants_{quiz_date}
+        data_str = cb.data
+        if "_page_" in data_str:
+            quiz_date = data_str.replace("admin_quiz_non_participants_", "").split("_page_")[0]
+            page = int(data_str.split("_page_")[1])
+        else:
+            quiz_date = data_str.replace("admin_quiz_non_participants_", "")
+            page = 0
+        
+        ITEMS_PER_PAGE = 50
         
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -3124,7 +3253,7 @@ async def admin_quiz_non_participants(cb: types.CallbackQuery):
                     )
                 )
             )
-            results = result.scalars().all()
+            all_results = result.scalars().all()
         
         try:
             date_obj = datetime.strptime(quiz_date, "%Y-%m-%d")
@@ -3132,10 +3261,23 @@ async def admin_quiz_non_participants(cb: types.CallbackQuery):
         except:
             date_display = quiz_date
         
+        total_items = len(all_results)
+        total_pages = (total_items + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE if total_items > 0 else 1
+        
+        if page < 0:
+            page = 0
+        if page >= total_pages:
+            page = total_pages - 1
+        
+        start_idx = page * ITEMS_PER_PAGE
+        end_idx = min(start_idx + ITEMS_PER_PAGE, total_items)
+        results = all_results[start_idx:end_idx]
+        
         text = f"⏭️ <b>Не приняли участие (квиз от {date_display})</b>\n\n"
+        text += f"Всего: {total_items} | Страница {page + 1}/{total_pages}\n\n"
         
         if results:
-            for i, r in enumerate(results, 1):  # Показываем всех участников
+            for i, r in enumerate(results, start=start_idx + 1):
                 user_info = f"<b>ID: {r.user_id}</b>"
                 if r.username:
                     user_info += f" @{r.username}"
@@ -3144,7 +3286,25 @@ async def admin_quiz_non_participants(cb: types.CallbackQuery):
         else:
             text += "Все приняли участие в квизе."
         
-        buttons = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_quiz_date_{quiz_date}")]]
+        buttons = []
+        
+        # Кнопки навигации
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"admin_quiz_non_participants_{quiz_date}_page_{page - 1}"
+            ))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton(
+                text="Вперед ▶️",
+                callback_data=f"admin_quiz_non_participants_{quiz_date}_page_{page + 1}"
+            ))
+        if nav_buttons:
+            buttons.append(nav_buttons)
+        
+        buttons.append([types.InlineKeyboardButton(text="◀️ Назад к квизу", callback_data=f"admin_quiz_date_{quiz_date}")])
+        
         await cb.message.edit_text(text, parse_mode="HTML", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons))
         await cb.answer()
         
