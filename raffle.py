@@ -11,8 +11,9 @@ from typing import Optional, Tuple, List, Dict
 from aiogram import types
 from sqlalchemy import select, and_
 from sqlalchemy.exc import SQLAlchemyError
-from database import AsyncSessionLocal, User, RaffleParticipant, Raffle
+from database import AsyncSessionLocal, User, RaffleParticipant, Raffle, QuizResult
 from resilience import safe_send_message, safe_send_photo
+from sqlalchemy import func
 
 logger = logging.getLogger(__name__)
 
@@ -930,8 +931,49 @@ async def get_users_for_reminder(raffle_date: str) -> List[RaffleParticipant]:
         return []
 
 
+async def get_next_raffle_ticket_number() -> int:
+    """Получает следующий номер билетика для розыгрыша
+    Ищет максимальный номер из QuizResult и RaffleParticipant
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            # Находим максимальный номер билетика из квизов
+            quiz_result = await session.execute(
+                select(func.max(QuizResult.ticket_number)).where(
+                    QuizResult.ticket_number.isnot(None)
+                )
+            )
+            max_quiz_ticket = quiz_result.scalar_one_or_none()
+            
+            # Находим максимальный номер билетика из розыгрышей
+            raffle_result = await session.execute(
+                select(func.max(RaffleParticipant.ticket_number)).where(
+                    RaffleParticipant.ticket_number.isnot(None)
+                )
+            )
+            max_raffle_ticket = raffle_result.scalar_one_or_none()
+            
+            # Берем максимальный из двух
+            max_ticket = None
+            if max_quiz_ticket is not None:
+                max_ticket = max_quiz_ticket
+            if max_raffle_ticket is not None:
+                if max_ticket is None or max_raffle_ticket > max_ticket:
+                    max_ticket = max_raffle_ticket
+            
+            # Если нет билетов, начинаем с 424 (423+1, как указал пользователь)
+            if max_ticket is None:
+                return 424
+            
+            return max_ticket + 1
+            
+    except Exception as e:
+        logger.error(f"Ошибка при получении следующего номера билетика для розыгрыша: {e}")
+        return 424
+
+
 async def approve_answer(user_id: int, raffle_date: str) -> bool:
-    """Принимает ответ пользователя"""
+    """Принимает ответ пользователя и выдает билет с номером"""
     try:
         async with AsyncSessionLocal() as session:
             participant = await session.execute(
@@ -947,17 +989,26 @@ async def approve_answer(user_id: int, raffle_date: str) -> bool:
             if not participant:
                 return False
             
+            # Проверяем, не выдан ли уже билет
+            if participant.ticket_number is not None:
+                logger.warning(f"Билет уже выдан пользователю {user_id} для розыгрыша {raffle_date}")
+            
             participant.is_correct = True
+            
+            # Получаем следующий номер билета
+            ticket_number = await get_next_raffle_ticket_number()
+            participant.ticket_number = ticket_number
+            
             await session.commit()
             
-            # Отправляем пользователю сообщение и картинку
+            # Отправляем пользователю сообщение с картинкой в одном сообщении
             from aiogram import Bot
             from config import TG_TOKEN
             bot = Bot(TG_TOKEN)
             
-            await safe_send_message(bot, user_id, "✅ Ты ответил правильно!")
+            message_text = f"✅ Ты ответил правильно! Твой билетик №{ticket_number}"
             
-            # Отправляем картинку билет.png
+            # Отправляем картинку билет.png с текстом в подписи
             from aiogram.types import FSInputFile
             ticket_path = Path("data/билет.png")
             if not ticket_path.exists():
@@ -970,9 +1021,11 @@ async def approve_answer(user_id: int, raffle_date: str) -> bool:
             
             if ticket_path.exists():
                 photo_file = FSInputFile(ticket_path)
-                await safe_send_photo(bot, user_id, photo_file, caption="🎫 Твой билет!")
+                await safe_send_photo(bot, user_id, photo_file, caption=message_text)
             else:
-                logger.warning(f"Файл билет.png не найден в data/")
+                logger.warning(f"Файл билет.png не найден в data/, отправляем только текст")
+                # Если файл не найден, отправляем только текст
+                await safe_send_message(bot, user_id, message_text)
             
             await bot.session.close()
             return True
@@ -1002,19 +1055,19 @@ async def deny_answer(user_id: int, raffle_date: str) -> bool:
             participant.is_correct = False
             await session.commit()
             
-            # Отправляем пользователю сообщение и картинку
+            # Отправляем пользователю сообщение с картинкой в одном сообщении
             from aiogram import Bot
             from config import TG_TOKEN
             bot = Bot(TG_TOKEN)
             
-            await safe_send_message(bot, user_id, "❌ Повтори ценности")
+            message_text = "К сожалению, твой ответ не принят. Не расстраивайся, в следующий раз, уверен, ответишь правильно, а пока - можешь повторить миссию и видение, которые несет компания Rostic's"
             
-            # Отправляем картинку ценности.jpg
+            # Отправляем картинку missions_cennosti.png с текстом в подписи
             from aiogram.types import FSInputFile
-            values_path = Path("data/ценности.jpg")
+            values_path = Path("data/missions_cennosti.png")
             if not values_path.exists():
                 # Пробуем разные варианты написания
-                for variant in ["ценности.JPG", "ценности.jpeg", "ценности.JPEG", "values.jpg"]:
+                for variant in ["missions_cennosti.PNG", "missions_cennosti.jpg", "missions_cennosti.JPG", "missions_cennosti.jpeg", "missions_cennosti.JPEG", "values.jpg", "values.png"]:
                     alt_path = Path(f"data/{variant}")
                     if alt_path.exists():
                         values_path = alt_path
@@ -1022,9 +1075,11 @@ async def deny_answer(user_id: int, raffle_date: str) -> bool:
             
             if values_path.exists():
                 photo_file = FSInputFile(values_path)
-                await safe_send_photo(bot, user_id, photo_file)
+                await safe_send_photo(bot, user_id, photo_file, caption=message_text)
             else:
-                logger.warning(f"Файл ценности.jpg не найден в data/")
+                logger.warning(f"Файл missions_cennosti.png не найден в data/, отправляем только текст")
+                # Если файл не найден, отправляем только текст
+                await safe_send_message(bot, user_id, message_text)
             
             await bot.session.close()
             return True

@@ -47,6 +47,17 @@ async def safe_migrate():
                 else:
                     logger.info("✅ Колонка announcement_time уже существует")
                 
+                # Проверяем и добавляем колонку ticket_number
+                if 'ticket_number' not in columns:
+                    logger.info("Добавляю колонку ticket_number...")
+                    await conn.execute(text("""
+                        ALTER TABLE raffle_participants 
+                        ADD COLUMN ticket_number INTEGER
+                    """))
+                    logger.info("✅ Колонка ticket_number добавлена")
+                else:
+                    logger.info("✅ Колонка ticket_number уже существует")
+                
                 # Проверяем тип поля id
                 id_type = columns.get('id', '').upper()
                 needs_recreate = False
@@ -89,7 +100,8 @@ async def safe_migrate():
                             timestamp DATETIME NOT NULL,
                             is_correct BOOLEAN,
                             message_id BIGINT,
-                            announcement_time DATETIME
+                            announcement_time DATETIME,
+                            ticket_number INTEGER
                         )
                     """))
                     logger.info("Новая таблица создана")
@@ -109,7 +121,7 @@ async def safe_migrate():
                             insert_cols = []
                             
                             for col in ['user_id', 'raffle_date', 'question_id', 'question_text', 
-                                       'answer', 'timestamp', 'is_correct', 'message_id', 'announcement_time']:
+                                       'answer', 'timestamp', 'is_correct', 'message_id', 'announcement_time', 'ticket_number']:
                                 if col in backup_columns:
                                     select_cols.append(col)
                                     insert_cols.append(col)
@@ -172,6 +184,26 @@ async def safe_migrate():
                     logger.info("✅ Колонка announcement_time добавлена")
                 else:
                     logger.info("✅ Колонка announcement_time уже существует")
+                
+                # Проверяем наличие колонки ticket_number
+                result = await conn.execute(text("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_schema = 'public'
+                    AND table_name = 'raffle_participants' 
+                    AND column_name = 'ticket_number'
+                """))
+                exists = result.first() is not None
+                
+                if not exists:
+                    logger.info("Добавляю колонку ticket_number...")
+                    await conn.execute(text("""
+                        ALTER TABLE raffle_participants 
+                        ADD COLUMN ticket_number INTEGER
+                    """))
+                    logger.info("✅ Колонка ticket_number добавлена")
+                else:
+                    logger.info("✅ Колонка ticket_number уже существует")
                 
                 # Для PostgreSQL тип id должен быть BIGINT или BIGSERIAL, проверяем
                 result = await conn.execute(text("""

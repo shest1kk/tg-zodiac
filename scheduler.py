@@ -408,8 +408,17 @@ def start_scheduler():
     
     # Планируем квизы только для указанного периода
     current_date = start_date
+    # Даты, когда квизы отключены
+    QUIZ_DISABLED_DATES = ["2025-12-15"]
+    
     while current_date <= end_date:
         quiz_date_str = current_date.strftime("%Y-%m-%d")
+        
+        # Пропускаем отключенные даты
+        if quiz_date_str in QUIZ_DISABLED_DATES:
+            logger.info(f"⏭️ Квиз для {quiz_date_str} отключен, пропускаем")
+            current_date += timedelta(days=1)
+            continue
         
         # Время объявления (12:00 МСК)
         announcement_datetime = datetime.combine(current_date, dt_time(hour=quiz_utc_hour, minute=quiz_utc_minute))
@@ -633,6 +642,12 @@ async def send_raffle_reminders_for_date(raffle_date: str):
 
 async def send_quiz_announcements_for_date(quiz_date: str):
     """Рассылка объявлений о квизе для конкретной даты"""
+    # Проверяем, не отключен ли квиз для этой даты
+    QUIZ_DISABLED_DATES = ["2025-12-15"]
+    if quiz_date in QUIZ_DISABLED_DATES:
+        logger.info(f"⏭️ Квиз для {quiz_date} отключен, объявления не отправляются")
+        return
+    
     if bot is None:
         logger.error("Бот не инициализирован в scheduler!")
         return
@@ -674,6 +689,12 @@ async def send_quiz_announcements_for_date(quiz_date: str):
 
 async def send_quiz_reminders_for_date(quiz_date: str):
     """Отправка напоминаний о квизе для конкретной даты"""
+    # Проверяем, не отключен ли квиз для этой даты
+    QUIZ_DISABLED_DATES = ["2025-12-15"]
+    if quiz_date in QUIZ_DISABLED_DATES:
+        logger.info(f"⏭️ Квиз для {quiz_date} отключен, напоминания не отправляются")
+        return
+    
     if bot is None:
         logger.error("Бот не инициализирован в scheduler!")
         return
@@ -715,6 +736,12 @@ async def send_quiz_reminders_for_date(quiz_date: str):
 
 async def mark_quiz_non_participants_for_date(quiz_date: str):
     """Отмечает пользователей, которые не приняли участие в квизе"""
+    # Проверяем, не отключен ли квиз для этой даты
+    QUIZ_DISABLED_DATES = ["2025-12-15"]
+    if quiz_date in QUIZ_DISABLED_DATES:
+        logger.info(f"⏭️ Квиз для {quiz_date} отключен, отметка не принимавших участие не выполняется")
+        return
+    
     if bot is None:
         logger.error("Бот не инициализирован в scheduler!")
         return

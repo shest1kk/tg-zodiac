@@ -1,6 +1,8 @@
 import asyncio
 import html
 import logging
+import csv
+import tempfile
 from datetime import datetime, timezone, timedelta, time as dt_time
 from pathlib import Path
 from aiogram import Bot, Dispatcher, types, F
@@ -9,7 +11,7 @@ from aiogram.filters import Command
 from aiogram.types import BotCommand
 from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from database import AsyncSessionLocal, init_db, User, RaffleParticipant, Raffle, Quiz, QuizParticipant, QuizResult
 from config import TG_TOKEN, DAILY_HOUR, DAILY_MINUTE, logger, ZODIAC_NAMES, ADMIN_ID, ADMIN_IDS
 from scheduler import start_scheduler, stop_scheduler, get_day_number, get_today_prediction, load_predictions
@@ -21,7 +23,7 @@ from raffle import (
     is_raffle_date, RAFFLE_ANSWER_TIME, RAFFLE_PARTICIPATION_WINDOW,
     create_or_get_raffle, stop_raffle, is_raffle_active,
     get_raffle_by_date, get_last_active_raffle, has_raffle_started, RAFFLE_DATES,
-    get_unchecked_answers, get_users_for_reminder
+    get_unchecked_answers, get_users_for_reminder, get_next_raffle_ticket_number
 )
 from quiz import (
     send_quiz_announcement, send_quiz_reminder, mark_non_participants,
@@ -175,7 +177,10 @@ async def cmd_help(message: types.Message):
             "<b>/reply</b> - Ответить пользователю\n"
             "<b>/broadcast</b> - Массовая рассылка\n"
             "<b>/test_send</b> - Тестовая отправка\n"
-            "<b>/set_prediction</b> - Редактировать предсказания"
+            "<b>/set_prediction</b> - Редактировать предсказания\n"
+            "<b>/add_ticket</b> - Выдать билет пользователю\n"
+            "<b>/check</b> - Проверить информацию о пользователе\n"
+            "<b>/users</b> - Экспорт списка пользователей в CSV"
         )
     
     await message.answer(help_text, parse_mode="HTML")
@@ -1254,6 +1259,413 @@ async def cmd_reply(message: types.Message):
         logger.error(f"Ошибка при ответе пользователю: {e}")
         await message.answer(f"❌ Ошибка: {e}")
 
+@dp.message(Command("add_ticket"))
+async def cmd_add_ticket(message: types.Message):
+    """Выдача билета пользователю администратором
+    
+    Формат: /add_ticket USER_ID
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split(maxsplit=1)
+        
+        if len(parts) < 2:
+            await message.answer(
+                "❌ Формат: /add_ticket USER_ID\n\n"
+                "Пример:\n"
+                "/add_ticket 123456789 - выдаст билет пользователю с ID 123456789"
+            )
+            return
+        
+        user_id = int(parts[1])
+        
+        # Получаем следующий номер билета
+        ticket_number = await get_next_raffle_ticket_number()
+        
+        # Получаем информацию о пользователе для сохранения
+        async with AsyncSessionLocal() as session:
+            user_result = await session.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = user_result.scalar_one_or_none()
+            username = user.username if user else None
+        
+        # Отправляем пользователю сообщение с картинкой в одном сообщении
+        message_text = f"Администратор выдал вам билетик №{ticket_number}"
+        
+        # Отправляем картинку билета с текстом в подписи
+        from aiogram.types import FSInputFile
+        ticket_path = Path("data/билет.png")
+        if not ticket_path.exists():
+            # Пробуем разные варианты написания
+            for variant in ["biлет.png", "билет.PNG", "biлет.PNG", "ticket.png"]:
+                alt_path = Path(f"data/{variant}")
+                if alt_path.exists():
+                    ticket_path = alt_path
+                    break
+        
+        photo_sent = False
+        if ticket_path.exists():
+            try:
+                photo_file = FSInputFile(str(ticket_path.absolute()))
+                photo_sent = await safe_send_photo(bot, user_id, photo_file, caption=message_text)
+            except Exception as e:
+                logger.warning(f"Не удалось отправить фото билета пользователю {user_id}: {e}")
+                # Если не удалось отправить фото, отправляем только текст
+                photo_sent = await safe_send_message(bot, user_id, message_text)
+        else:
+            logger.warning(f"Файл билет.png не найден в data/, отправляем только текст")
+            # Если файл не найден, отправляем только текст
+            photo_sent = await safe_send_message(bot, user_id, message_text)
+        
+        if not photo_sent:
+            await message.answer(f"❌ Не удалось отправить сообщение пользователю {user_id}. Возможно, он заблокировал бота.")
+            return
+        
+        # Сохраняем информацию о выданном билете в QuizResult для отслеживания номеров
+        # Используем дату "manual" для ручной выдачи админом
+        try:
+            async with AsyncSessionLocal() as session:
+                result = QuizResult(
+                    user_id=user_id,
+                    username=username,
+                    quiz_date="manual",  # Специальная дата для ручной выдачи
+                    correct_answers=0,
+                    total_questions=0,
+                    ticket_number=ticket_number,
+                    completed_at=datetime.utcnow()
+                )
+                session.add(result)
+                await session.commit()
+                logger.info(f"Информация о выданном билете №{ticket_number} сохранена в БД для пользователя {user_id}")
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении информации о билете в БД: {e}", exc_info=True)
+            # Продолжаем работу, даже если не удалось сохранить
+        
+        await message.answer(f"✅ Билет №{ticket_number} успешно выдан пользователю {user_id}")
+        
+        logger.info(f"Админ {message.from_user.id} выдал билет №{ticket_number} пользователю {user_id}")
+        
+    except ValueError:
+        await message.answer("❌ Неверный формат USER_ID. Должно быть число.")
+    except Exception as e:
+        logger.error(f"Ошибка при выдаче билета: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("check"))
+async def cmd_check(message: types.Message):
+    """Проверка информации о пользователе по ID
+    
+    Формат: /check USER_ID
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split(maxsplit=1)
+        
+        if len(parts) < 2:
+            await message.answer(
+                "❌ Формат: /check USER_ID\n\n"
+                "Пример:\n"
+                "/check 123456789 - покажет всю информацию о пользователе"
+            )
+            return
+        
+        user_id = int(parts[1])
+        
+        async with AsyncSessionLocal() as session:
+            # Получаем основную информацию о пользователе
+            user = await session.get(User, user_id)
+            
+            if not user:
+                await message.answer(f"❌ Пользователь с ID {user_id} не найден в базе данных.")
+                return
+            
+            # Получаем билеты из квизов (включая ручную выдачу)
+            quiz_tickets_result = await session.execute(
+                select(QuizResult).where(
+                    and_(
+                        QuizResult.user_id == user_id,
+                        QuizResult.ticket_number.isnot(None)
+                    )
+                ).order_by(QuizResult.ticket_number.asc())
+            )
+            quiz_tickets = quiz_tickets_result.scalars().all()
+            
+            # Получаем билеты из розыгрышей
+            raffle_tickets_result = await session.execute(
+                select(RaffleParticipant).where(
+                    and_(
+                        RaffleParticipant.user_id == user_id,
+                        RaffleParticipant.ticket_number.isnot(None)
+                    )
+                ).order_by(RaffleParticipant.ticket_number.asc())
+            )
+            raffle_tickets = raffle_tickets_result.scalars().all()
+            
+            # Получаем участие в квизах
+            quiz_participants_result = await session.execute(
+                select(QuizParticipant).where(
+                    QuizParticipant.user_id == user_id
+                ).order_by(QuizParticipant.quiz_date.desc())
+            )
+            quiz_participants = quiz_participants_result.scalars().all()
+            
+            # Получаем результаты квизов
+            quiz_results_result = await session.execute(
+                select(QuizResult).where(
+                    QuizResult.user_id == user_id
+                ).order_by(QuizResult.quiz_date.desc())
+            )
+            quiz_results = quiz_results_result.scalars().all()
+            
+            # Получаем участие в розыгрышах
+            raffle_participants_result = await session.execute(
+                select(RaffleParticipant).where(
+                    RaffleParticipant.user_id == user_id
+                ).order_by(RaffleParticipant.raffle_date.desc())
+            )
+            raffle_participants = raffle_participants_result.scalars().all()
+            
+            # Формируем текст ответа
+            zodiac_name = user.zodiac_name or (ZODIAC_NAMES.get(user.zodiac) if user.zodiac else "Не выбран")
+            subscribed_status = "✅ Подписан" if user.subscribed else "❌ Не подписан"
+            created_at_str = user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else "Неизвестно"
+            
+            text = (
+                f"🔍 <b>Информация о пользователе</b>\n\n"
+                f"<b>Основная информация:</b>\n"
+                f"🆔 ID: <code>{user.id}</code>\n"
+                f"👤 Имя: {user.first_name or 'Не указано'}\n"
+                f"📱 Username: @{user.username if user.username else 'не указан'}\n"
+                f"⭐ Знак зодиака: {zodiac_name}\n"
+                f"📬 Статус подписки: {subscribed_status}\n"
+                f"📅 Дата регистрации: {created_at_str}\n\n"
+            )
+            
+            # Билеты
+            all_tickets = []
+            for ticket in quiz_tickets:
+                all_tickets.append((ticket.ticket_number, "квиз" if ticket.quiz_date != "manual" else "ручная выдача", ticket.quiz_date))
+            for ticket in raffle_tickets:
+                all_tickets.append((ticket.ticket_number, "розыгрыш", ticket.raffle_date))
+            
+            all_tickets.sort(key=lambda x: x[0])  # Сортируем по номеру билета
+            
+            text += f"<b>🎫 Билеты:</b> {len(all_tickets)}\n"
+            if all_tickets:
+                ticket_info = []
+                for ticket_num, source, date in all_tickets:
+                    if source == "ручная выдача":
+                        ticket_info.append(f"№<b>{ticket_num}</b> ({source})")
+                    else:
+                        try:
+                            date_obj = datetime.strptime(date, "%Y-%m-%d")
+                            date_display = date_obj.strftime("%d.%m.%Y")
+                        except:
+                            date_display = date
+                        ticket_info.append(f"№<b>{ticket_num}</b> ({source}, {date_display})")
+                text += ", ".join(ticket_info) + "\n\n"
+            else:
+                text += "Нет билетов\n\n"
+            
+            # Участие в квизах
+            text += f"<b>🎯 Квизы:</b> {len(quiz_participants)} участий\n"
+            if quiz_participants:
+                quiz_info = []
+                for participant in quiz_participants[:10]:  # Показываем последние 10
+                    try:
+                        date_obj = datetime.strptime(participant.quiz_date, "%Y-%m-%d")
+                        date_display = date_obj.strftime("%d.%m.%Y")
+                    except:
+                        date_display = participant.quiz_date
+                    status = "✅ Завершен" if participant.completed else "⏳ В процессе" if participant.started_at else "📨 Объявление отправлено"
+                    quiz_info.append(f"{date_display} ({status})")
+                text += "\n".join(quiz_info)
+                if len(quiz_participants) > 10:
+                    text += f"\n... и еще {len(quiz_participants) - 10} квизов"
+                text += "\n\n"
+            else:
+                text += "Не участвовал\n\n"
+            
+            # Результаты квизов
+            completed_quizzes = [r for r in quiz_results if r.total_questions > 0]
+            text += f"<b>📊 Результаты квизов:</b> {len(completed_quizzes)} завершенных\n"
+            if completed_quizzes:
+                results_info = []
+                for result in completed_quizzes[:10]:  # Показываем последние 10
+                    try:
+                        date_obj = datetime.strptime(result.quiz_date, "%Y-%m-%d")
+                        date_display = date_obj.strftime("%d.%m.%Y")
+                    except:
+                        date_display = result.quiz_date
+                    ticket_info = f" (билет №<b>{result.ticket_number}</b>)" if result.ticket_number else ""
+                    results_info.append(f"{date_display}: {result.correct_answers}/{result.total_questions}{ticket_info}")
+                text += "\n".join(results_info)
+                if len(completed_quizzes) > 10:
+                    text += f"\n... и еще {len(completed_quizzes) - 10} результатов"
+                text += "\n\n"
+            else:
+                text += "Нет завершенных квизов\n\n"
+            
+            # Участие в розыгрышах
+            text += f"<b>🎁 Розыгрыши:</b> {len(raffle_participants)} участий\n"
+            if raffle_participants:
+                raffle_info = []
+                for participant in raffle_participants[:10]:  # Показываем последние 10
+                    try:
+                        date_obj = datetime.strptime(participant.raffle_date, "%Y-%m-%d")
+                        date_display = date_obj.strftime("%d.%m.%Y")
+                    except:
+                        date_display = participant.raffle_date
+                    if participant.is_correct is True:
+                        status = f"✅ Принят (билет №<b>{participant.ticket_number}</b>)" if participant.ticket_number else "✅ Принят"
+                    elif participant.is_correct is False:
+                        status = "❌ Отклонен"
+                    elif participant.answer:
+                        status = "⏳ Ожидает проверки"
+                    else:
+                        status = "📨 Получил вопрос"
+                    raffle_info.append(f"{date_display}: {status}")
+                text += "\n".join(raffle_info)
+                if len(raffle_participants) > 10:
+                    text += f"\n... и еще {len(raffle_participants) - 10} розыгрышей"
+            else:
+                text += "Не участвовал"
+        
+        await message.answer(text, parse_mode="HTML")
+        logger.info(f"Админ {message.from_user.id} проверил информацию о пользователе {user_id}")
+        
+    except ValueError:
+        await message.answer("❌ Неверный формат USER_ID. Должно быть число.")
+    except Exception as e:
+        logger.error(f"Ошибка при проверке информации о пользователе: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("users"))
+async def cmd_users(message: types.Message):
+    """Экспорт списка пользователей в CSV файл
+    
+    Формат: /users
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        await message.answer("⏳ Формирую список пользователей...")
+        
+        async with AsyncSessionLocal() as session:
+            # Получаем всех пользователей
+            users_result = await session.execute(
+                select(User).order_by(User.created_at.asc())
+            )
+            users = users_result.scalars().all()
+            
+            if not users:
+                await message.answer("❌ Пользователи не найдены.")
+                return
+            
+            # Создаем временный файл для CSV
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8-sig', newline='', suffix='.csv', delete=False) as csv_file:
+                writer = csv.writer(csv_file, delimiter=';')
+                
+                # Заголовки
+                writer.writerow([
+                    'ID',
+                    'Username',
+                    'Имя',
+                    'Знак зодиака',
+                    'Подписан',
+                    'Дата регистрации',
+                    'Количество билетов (квизы)',
+                    'Количество билетов (розыгрыши)',
+                    'Всего билетов',
+                    'Номера билетов'
+                ])
+                
+                # Данные для каждого пользователя
+                for user in users:
+                    # Получаем билеты из квизов
+                    quiz_tickets_result = await session.execute(
+                        select(QuizResult).where(
+                            and_(
+                                QuizResult.user_id == user.id,
+                                QuizResult.ticket_number.isnot(None)
+                            )
+                        ).order_by(QuizResult.ticket_number.asc())
+                    )
+                    quiz_tickets = quiz_tickets_result.scalars().all()
+                    
+                    # Получаем билеты из розыгрышей
+                    raffle_tickets_result = await session.execute(
+                        select(RaffleParticipant).where(
+                            and_(
+                                RaffleParticipant.user_id == user.id,
+                                RaffleParticipant.ticket_number.isnot(None)
+                            )
+                        ).order_by(RaffleParticipant.ticket_number.asc())
+                    )
+                    raffle_tickets = raffle_tickets_result.scalars().all()
+                    
+                    # Собираем все номера билетов
+                    all_ticket_numbers = []
+                    for ticket in quiz_tickets:
+                        all_ticket_numbers.append(ticket.ticket_number)
+                    for ticket in raffle_tickets:
+                        all_ticket_numbers.append(ticket.ticket_number)
+                    all_ticket_numbers.sort()
+                    
+                    # Формируем строку с номерами билетов
+                    tickets_str = ', '.join(map(str, all_ticket_numbers)) if all_ticket_numbers else ''
+                    
+                    # Определяем знак зодиака
+                    zodiac_name = user.zodiac_name or (ZODIAC_NAMES.get(user.zodiac) if user.zodiac else "Не выбран")
+                    
+                    # Записываем строку
+                    writer.writerow([
+                        user.id,
+                        user.username or '',
+                        user.first_name or '',
+                        zodiac_name,
+                        'Да' if user.subscribed else 'Нет',
+                        user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else '',
+                        len(quiz_tickets),
+                        len(raffle_tickets),
+                        len(all_ticket_numbers),
+                        tickets_str
+                    ])
+                
+                csv_file_path = csv_file.name
+            
+            # Отправляем файл админу
+            try:
+                document = FSInputFile(csv_file_path, filename=f"users_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+                await bot.send_document(
+                    message.from_user.id,
+                    document,
+                    caption=f"📊 Список пользователей\n\nВсего пользователей: {len(users)}"
+                )
+                logger.info(f"Админ {message.from_user.id} экспортировал список пользователей ({len(users)} пользователей)")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке CSV файла: {e}", exc_info=True)
+                await message.answer(f"❌ Ошибка при отправке файла: {e}")
+            finally:
+                # Удаляем временный файл
+                try:
+                    Path(csv_file_path).unlink()
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить временный файл {csv_file_path}: {e}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при экспорте пользователей: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
 @dp.callback_query(F.data == "admin_back")
 async def admin_back(cb: types.CallbackQuery):
     """Возврат в главное меню админа"""
@@ -2134,7 +2546,7 @@ async def admin_raffle_question(cb: types.CallbackQuery):
         
         if active_participants:
             text += "Список участников:\n"
-            for i, p in enumerate(active_participants[:20], 1):  # Показываем первые 20
+            for i, p in enumerate(active_participants, 1):  # Показываем всех участников
                 if p.is_correct is True:
                     status = "✅ принят"
                 elif p.is_correct is False:
@@ -2144,9 +2556,6 @@ async def admin_raffle_question(cb: types.CallbackQuery):
                 else:
                     status = "⏳ не проверен"
                 text += f"{i}. ID: {p.user_id} - {status}\n"
-            
-            if len(active_participants) > 20:
-                text += f"\n... и еще {len(active_participants) - 20} участников"
         else:
             text += "Участников пока нет."
         
@@ -2573,7 +2982,7 @@ async def admin_quiz_participants(cb: types.CallbackQuery):
         text = f"👥 <b>Все участники квиза от {date_display}</b>\n\n"
         
         if participants:
-            for i, p in enumerate(participants[:50], 1):  # Показываем первые 50
+            for i, p in enumerate(participants, 1):  # Показываем всех участников
                 user = users.get(p.user_id)
                 username = f"@{user.username}" if user and user.username else ""
                 first_name = user.first_name if user and user.first_name else ""
@@ -2586,9 +2995,6 @@ async def admin_quiz_participants(cb: types.CallbackQuery):
                 
                 status = "✅ Завершен" if p.completed else ("⏳ В процессе" if p.started_at else "⏸️ Не начат")
                 text += f"{i}. {user_info} - {status}\n"
-            
-            if len(participants) > 50:
-                text += f"\n... и еще {len(participants) - 50} участников"
         else:
             text += "Участников пока нет."
         
@@ -2631,15 +3037,12 @@ async def admin_quiz_tickets(cb: types.CallbackQuery):
         text = f"🎫 <b>Получили билетик (квиз от {date_display})</b>\n\n"
         
         if results:
-            for i, r in enumerate(results[:50], 1):  # Показываем первые 50
+            for i, r in enumerate(results, 1):  # Показываем всех участников
                 user_info = f"<b>ID: {r.user_id}</b>"
                 if r.username:
                     user_info += f" @{r.username}"
                 
                 text += f"{i}. {user_info} - Билетик №{r.ticket_number} ({r.correct_answers}/{r.total_questions})\n"
-            
-            if len(results) > 50:
-                text += f"\n... и еще {len(results) - 50} участников"
         else:
             text += "Никто еще не получил билетик."
         
@@ -2683,15 +3086,12 @@ async def admin_quiz_no_tickets(cb: types.CallbackQuery):
         text = f"❌ <b>Не получили билетик (квиз от {date_display})</b>\n\n"
         
         if results:
-            for i, r in enumerate(results[:50], 1):  # Показываем первые 50
+            for i, r in enumerate(results, 1):  # Показываем всех участников
                 user_info = f"<b>ID: {r.user_id}</b>"
                 if r.username:
                     user_info += f" @{r.username}"
                 
                 text += f"{i}. {user_info} - {r.correct_answers}/{r.total_questions} правильных\n"
-            
-            if len(results) > 50:
-                text += f"\n... и еще {len(results) - 50} участников"
         else:
             text += "Все участники получили билетик или никто не прошел квиз."
         
@@ -2735,15 +3135,12 @@ async def admin_quiz_non_participants(cb: types.CallbackQuery):
         text = f"⏭️ <b>Не приняли участие (квиз от {date_display})</b>\n\n"
         
         if results:
-            for i, r in enumerate(results[:50], 1):  # Показываем первые 50
+            for i, r in enumerate(results, 1):  # Показываем всех участников
                 user_info = f"<b>ID: {r.user_id}</b>"
                 if r.username:
                     user_info += f" @{r.username}"
                 
                 text += f"{i}. {user_info}\n"
-            
-            if len(results) > 50:
-                text += f"\n... и еще {len(results) - 50} участников"
         else:
             text += "Все приняли участие в квизе."
         
@@ -3851,6 +4248,9 @@ async def setup_bot_commands():
                 BotCommand(command="admin", description="🔐 Админ-панель"),
                 BotCommand(command="stats", description="📊 Статистика"),
                 BotCommand(command="reply", description="💬 Ответить пользователю"),
+                BotCommand(command="add_ticket", description="🎫 Выдать билет пользователю"),
+                BotCommand(command="check", description="🔍 Проверить информацию о пользователе"),
+                BotCommand(command="users", description="📊 Экспорт списка пользователей в CSV"),
             ]
             for admin_id in ADMIN_IDS:
                 try:

@@ -45,13 +45,14 @@ class RaffleParticipant(Base):
     id = Column(ID_TYPE, primary_key=True, autoincrement=True)  # Integer для SQLite, BigInteger для PostgreSQL
     user_id = Column(BigInteger, nullable=False)  # ID пользователя
     raffle_date = Column(String, nullable=False)  # Дата розыгрыша (YYYY-MM-DD)
-    question_id = Column(Integer, nullable=False)  # ID вопроса (1-5)
+    question_id = Column(Integer, nullable=False)  # ID вопроса (для розыгрышей)
     question_text = Column(String, nullable=False)  # Текст вопроса
     answer = Column(String, nullable=True)  # Ответ пользователя
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)  # Время получения вопроса (нажатия кнопки)
     is_correct = Column(Boolean, nullable=True)  # True - принят, False - отклонен, None - не проверен
     message_id = Column(BigInteger, nullable=True)  # ID сообщения с объявлением для редактирования
     announcement_time = Column(DateTime, nullable=True)  # Время отправки объявления о розыгрыше
+    ticket_number = Column(Integer, nullable=True)  # Номер билетика (если ответ принят)
 
 
 class Quiz(Base):
