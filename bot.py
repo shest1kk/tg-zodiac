@@ -4810,6 +4810,131 @@ async def cmd_remove_ticket(message: types.Message):
         logger.error(f"Ошибка при удалении билетика: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка: {e}")
 
+@dp.message(Command("check_ticket_time"))
+async def cmd_check_ticket_time(message: types.Message):
+    """Проверить время выдачи билетика для сравнения"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer("❌ Формат: /check_ticket_time TICKET_NUMBER\n\n"
+                                "Пример:\n"
+                                "/check_ticket_time 166 - показать время выдачи билетика №166 всем пользователям")
+            return
+        
+        ticket_number = int(parts[1])
+        
+        async with AsyncSessionLocal() as session:
+            # Ищем билетики в квизах
+            quiz_result = await session.execute(
+                select(QuizResult).where(
+                    QuizResult.ticket_number == ticket_number
+                ).order_by(QuizResult.completed_at.asc())
+            )
+            quiz_tickets = quiz_result.scalars().all()
+            
+            # Ищем билетики в розыгрышах
+            raffle_result = await session.execute(
+                select(RaffleParticipant).where(
+                    RaffleParticipant.ticket_number == ticket_number
+                ).order_by(RaffleParticipant.timestamp.asc())
+            )
+            raffle_tickets = raffle_result.scalars().all()
+            
+            if not quiz_tickets and not raffle_tickets:
+                await message.answer(f"❌ Билетик №{ticket_number} не найден")
+                return
+            
+            text = f"🎟 <b>Билетик №{ticket_number} - время выдачи:</b>\n\n"
+            
+            all_tickets = []
+            
+            # Добавляем квизы
+            for ticket in quiz_tickets:
+                try:
+                    date_obj = datetime.strptime(ticket.quiz_date, "%Y-%m-%d")
+                    date_display = date_obj.strftime("%d.%m.%Y")
+                except:
+                    date_display = ticket.quiz_date
+                
+                # Конвертируем UTC в МСК для отображения
+                if ticket.completed_at:
+                    if ticket.completed_at.tzinfo is None:
+                        # Если время без таймзоны, считаем что это UTC
+                        moscow_tz = timezone(timedelta(hours=3))
+                        utc_time = ticket.completed_at.replace(tzinfo=timezone.utc)
+                        moscow_time = utc_time.astimezone(moscow_tz)
+                        time_display = moscow_time.strftime("%d.%m.%Y %H:%M:%S МСК")
+                    else:
+                        moscow_tz = timezone(timedelta(hours=3))
+                        moscow_time = ticket.completed_at.astimezone(moscow_tz)
+                        time_display = moscow_time.strftime("%d.%m.%Y %H:%M:%S МСК")
+                else:
+                    time_display = "неизвестно"
+                
+                all_tickets.append({
+                    'user_id': ticket.user_id,
+                    'source': 'квиз',
+                    'date': date_display,
+                    'time': ticket.completed_at,
+                    'time_display': time_display
+                })
+            
+            # Добавляем розыгрыши
+            for ticket in raffle_tickets:
+                try:
+                    date_obj = datetime.strptime(ticket.raffle_date, "%Y-%m-%d")
+                    date_display = date_obj.strftime("%d.%m.%Y")
+                except:
+                    date_display = ticket.raffle_date
+                
+                # Для розыгрышей точное время выдачи билетика не сохраняется
+                # Показываем время получения вопроса (билетик выдается позже при одобрении)
+                if ticket.timestamp:
+                    if ticket.timestamp.tzinfo is None:
+                        moscow_tz = timezone(timedelta(hours=3))
+                        utc_time = ticket.timestamp.replace(tzinfo=timezone.utc)
+                        moscow_time = utc_time.astimezone(moscow_tz)
+                        time_display = moscow_time.strftime("%d.%m.%Y %H:%M:%S МСК") + " (время вопроса, билетик выдан позже)"
+                    else:
+                        moscow_tz = timezone(timedelta(hours=3))
+                        moscow_time = ticket.timestamp.astimezone(moscow_tz)
+                        time_display = moscow_time.strftime("%d.%m.%Y %H:%M:%S МСК") + " (время вопроса, билетик выдан позже)"
+                else:
+                    time_display = "неизвестно"
+                
+                all_tickets.append({
+                    'user_id': ticket.user_id,
+                    'source': 'розыгрыш',
+                    'date': date_display,
+                    'time': ticket.timestamp,  # Используем timestamp как приблизительное время
+                    'time_display': time_display
+                })
+            
+            # Сортируем по времени
+            all_tickets.sort(key=lambda x: x['time'] if x['time'] else datetime.min.replace(tzinfo=timezone.utc))
+            
+            # Формируем текст
+            for i, ticket_info in enumerate(all_tickets, 1):
+                text += f"{i}. <b>ID {ticket_info['user_id']}</b>\n"
+                text += f"   📅 {ticket_info['source']} ({ticket_info['date']})\n"
+                text += f"   ⏰ {ticket_info['time_display']}\n\n"
+            
+            if len(all_tickets) > 1:
+                first = all_tickets[0]
+                text += f"🏆 <b>Первым получил:</b> ID {first['user_id']} ({first['source']})"
+            
+            await message.answer(text, parse_mode="HTML")
+                
+    except ValueError as e:
+        await message.answer(f"❌ Неверный формат: TICKET_NUMBER должен быть числом")
+    except Exception as e:
+        logger.error(f"Ошибка при проверке времени билетика: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
 @dp.message()
 async def handle_unknown(message: types.Message, state: FSMContext):
     """Обработчик неизвестных команд и сообщений"""
