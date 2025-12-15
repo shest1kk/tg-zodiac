@@ -2,7 +2,7 @@
 Роуты для управления квизами
 """
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select, func, and_
 from database import AsyncSessionLocal, Quiz, QuizResult, QuizParticipant
 from web.auth import verify_admin
 
