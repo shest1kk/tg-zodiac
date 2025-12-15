@@ -32,6 +32,9 @@ TICKET_START_NUMBER = 100  # Начальный номер билетика (п�
 # Словарь для хранения задач таймаута: {user_id: task}
 quiz_timeout_tasks = {}
 
+# Блокировка для предотвращения race condition при выдаче билетиков
+_ticket_number_lock = asyncio.Lock()
+
 
 def load_quiz(quiz_date: str) -> Optional[Dict]:
     """Загружает квиз для указанной даты из quiz.json"""
@@ -430,43 +433,46 @@ async def mark_non_participants(quiz_date: str):
 async def get_next_ticket_number() -> int:
     """Получает следующий номер билетика (начиная с 101)
     Ищет максимальный номер из QuizResult и RaffleParticipant
+    
+    Использует блокировку для предотвращения race condition при одновременных запросах
     """
-    try:
-        async with AsyncSessionLocal() as session:
-            # Находим максимальный номер билетика из квизов
-            quiz_result = await session.execute(
-                select(func.max(QuizResult.ticket_number)).where(
-                    QuizResult.ticket_number.isnot(None)
+    async with _ticket_number_lock:  # Блокируем доступ для предотвращения дублей
+        try:
+            async with AsyncSessionLocal() as session:
+                # Находим максимальный номер билетика из квизов
+                quiz_result = await session.execute(
+                    select(func.max(QuizResult.ticket_number)).where(
+                        QuizResult.ticket_number.isnot(None)
+                    )
                 )
-            )
-            max_quiz_ticket = quiz_result.scalar_one_or_none()
-            
-            # Находим максимальный номер билетика из розыгрышей
-            from database import RaffleParticipant
-            raffle_result = await session.execute(
-                select(func.max(RaffleParticipant.ticket_number)).where(
-                    RaffleParticipant.ticket_number.isnot(None)
+                max_quiz_ticket = quiz_result.scalar_one_or_none()
+                
+                # Находим максимальный номер билетика из розыгрышей
+                from database import RaffleParticipant
+                raffle_result = await session.execute(
+                    select(func.max(RaffleParticipant.ticket_number)).where(
+                        RaffleParticipant.ticket_number.isnot(None)
+                    )
                 )
-            )
-            max_raffle_ticket = raffle_result.scalar_one_or_none()
-            
-            # Берем максимальный из двух
-            max_ticket = None
-            if max_quiz_ticket is not None:
-                max_ticket = max_quiz_ticket
-            if max_raffle_ticket is not None:
-                if max_ticket is None or max_raffle_ticket > max_ticket:
-                    max_ticket = max_raffle_ticket
-            
-            # Если нет билетов, начинаем с 101
-            if max_ticket is None:
-                return TICKET_START_NUMBER + 1  # Первый билетик = 101
-            
-            return max_ticket + 1
-            
-    except Exception as e:
-        logger.error(f"Ошибка при получении следующего номера билетика: {e}")
-        return TICKET_START_NUMBER + 1
+                max_raffle_ticket = raffle_result.scalar_one_or_none()
+                
+                # Берем максимальный из двух
+                max_ticket = None
+                if max_quiz_ticket is not None:
+                    max_ticket = max_quiz_ticket
+                if max_raffle_ticket is not None:
+                    if max_ticket is None or max_raffle_ticket > max_ticket:
+                        max_ticket = max_raffle_ticket
+                
+                # Если нет билетов, начинаем с 101
+                if max_ticket is None:
+                    return TICKET_START_NUMBER + 1  # Первый билетик = 101
+                
+                return max_ticket + 1
+                
+        except Exception as e:
+            logger.error(f"Ошибка при получении следующего номера билетика: {e}")
+            return TICKET_START_NUMBER + 1
 
 
 async def check_quiz_timeout(bot, user_id: int, quiz_date: str):

@@ -934,42 +934,48 @@ async def get_users_for_reminder(raffle_date: str) -> List[RaffleParticipant]:
 async def get_next_raffle_ticket_number() -> int:
     """Получает следующий номер билетика для розыгрыша
     Ищет максимальный номер из QuizResult и RaffleParticipant
+    
+    Использует блокировку для предотвращения race condition при одновременных запросах
     """
-    try:
-        async with AsyncSessionLocal() as session:
-            # Находим максимальный номер билетика из квизов
-            quiz_result = await session.execute(
-                select(func.max(QuizResult.ticket_number)).where(
-                    QuizResult.ticket_number.isnot(None)
+    # Импортируем блокировку из quiz.py для синхронизации между квизами и розыгрышами
+    from quiz import _ticket_number_lock
+    
+    async with _ticket_number_lock:  # Блокируем доступ для предотвращения дублей
+        try:
+            async with AsyncSessionLocal() as session:
+                # Находим максимальный номер билетика из квизов
+                quiz_result = await session.execute(
+                    select(func.max(QuizResult.ticket_number)).where(
+                        QuizResult.ticket_number.isnot(None)
+                    )
                 )
-            )
-            max_quiz_ticket = quiz_result.scalar_one_or_none()
-            
-            # Находим максимальный номер билетика из розыгрышей
-            raffle_result = await session.execute(
-                select(func.max(RaffleParticipant.ticket_number)).where(
-                    RaffleParticipant.ticket_number.isnot(None)
+                max_quiz_ticket = quiz_result.scalar_one_or_none()
+                
+                # Находим максимальный номер билетика из розыгрышей
+                raffle_result = await session.execute(
+                    select(func.max(RaffleParticipant.ticket_number)).where(
+                        RaffleParticipant.ticket_number.isnot(None)
+                    )
                 )
-            )
-            max_raffle_ticket = raffle_result.scalar_one_or_none()
-            
-            # Берем максимальный из двух
-            max_ticket = None
-            if max_quiz_ticket is not None:
-                max_ticket = max_quiz_ticket
-            if max_raffle_ticket is not None:
-                if max_ticket is None or max_raffle_ticket > max_ticket:
-                    max_ticket = max_raffle_ticket
-            
-            # Если нет билетов, начинаем с 424 (423+1, как указал пользователь)
-            if max_ticket is None:
-                return 424
-            
-            return max_ticket + 1
-            
-    except Exception as e:
-        logger.error(f"Ошибка при получении следующего номера билетика для розыгрыша: {e}")
-        return 424
+                max_raffle_ticket = raffle_result.scalar_one_or_none()
+                
+                # Берем максимальный из двух
+                max_ticket = None
+                if max_quiz_ticket is not None:
+                    max_ticket = max_quiz_ticket
+                if max_raffle_ticket is not None:
+                    if max_ticket is None or max_raffle_ticket > max_ticket:
+                        max_ticket = max_raffle_ticket
+                
+                # Если нет билетов, начинаем с 424 (423+1, как указал пользователь)
+                if max_ticket is None:
+                    return 424
+                
+                return max_ticket + 1
+                
+        except Exception as e:
+            logger.error(f"Ошибка при получении следующего номера билетика для розыгрыша: {e}")
+            return 424
 
 
 async def approve_answer(user_id: int, raffle_date: str) -> bool:
