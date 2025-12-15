@@ -209,11 +209,17 @@ async def cmd_help(message: types.Message):
             "🔐 <b>Админские команды:</b>\n"
             "<b>/admin</b> - Админ-панель\n"
             "<b>/stats</b> - Статистика бота\n"
+            "<b>/ticket_stats</b> - Статистика по билетикам\n"
+            "<b>/system_health</b> - Состояние системы\n"
+            "<b>/recent_errors</b> - Последние ошибки\n"
+            "<b>/daily_report</b> - Ежедневный отчет\n"
+            "<b>/weekly_report</b> - Еженедельный отчет\n"
             "<b>/reply</b> - Ответить пользователю\n"
             "<b>/broadcast</b> - Массовая рассылка\n"
             "<b>/set_prediction</b> - Редактировать предсказания\n"
             "<b>/add_ticket</b> - Выдать билет пользователю\n"
             "<b>/remove_ticket</b> - Удалить билетик у пользователя\n"
+            "<b>/check_ticket_time</b> - Проверить время выдачи билетика\n"
             "<b>/check</b> - Проверить информацию о пользователе\n"
             "<b>/users</b> - Экспорт списка пользователей в CSV\n"
             "<b>/registered</b> - Список зарегистрированных пользователей\n"
@@ -4948,6 +4954,460 @@ async def cmd_check_ticket_time(message: types.Message):
         await message.answer(f"❌ Неверный формат: TICKET_NUMBER должен быть числом")
     except Exception as e:
         logger.error(f"Ошибка при проверке времени билетика: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+# Хранилище последних ошибок для команды /recent_errors
+recent_errors = []
+MAX_ERRORS_STORED = 50
+
+def log_error_for_admin(error_msg: str, exc_info=None):
+    """Добавляет ошибку в список для отображения админам"""
+    from datetime import datetime
+    error_entry = {
+        'time': datetime.now(),
+        'message': error_msg,
+        'traceback': str(exc_info) if exc_info else None
+    }
+    recent_errors.append(error_entry)
+    # Ограничиваем количество хранимых ошибок
+    if len(recent_errors) > MAX_ERRORS_STORED:
+        recent_errors.pop(0)
+
+# Перехватываем ошибки из logger для добавления в хранилище
+class AdminErrorHandler(logging.Handler):
+    """Кастомный handler для логирования ошибок в хранилище админов"""
+    def emit(self, record):
+        if record.levelno >= logging.ERROR:
+            error_msg = self.format(record)
+            log_error_for_admin(error_msg, record.exc_info)
+
+# Добавляем handler к корневому logger
+admin_error_handler = AdminErrorHandler()
+admin_error_handler.setLevel(logging.ERROR)
+logging.getLogger().addHandler(admin_error_handler)
+
+@dp.message(Command("ticket_stats"))
+async def cmd_ticket_stats(message: types.Message):
+    """Статистика по билетикам"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        async with AsyncSessionLocal() as session:
+            from sqlalchemy import func
+            
+            # Общее количество билетиков
+            total_quiz_tickets = await session.scalar(
+                select(func.count(QuizResult.ticket_number)).where(
+                    QuizResult.ticket_number.isnot(None)
+                )
+            )
+            total_raffle_tickets = await session.scalar(
+                select(func.count(RaffleParticipant.ticket_number)).where(
+                    RaffleParticipant.ticket_number.isnot(None)
+                )
+            )
+            total_tickets = (total_quiz_tickets or 0) + (total_raffle_tickets or 0)
+            
+            # Минимальный и максимальный номера
+            min_quiz = await session.scalar(
+                select(func.min(QuizResult.ticket_number)).where(
+                    QuizResult.ticket_number.isnot(None)
+                )
+            )
+            max_quiz = await session.scalar(
+                select(func.max(QuizResult.ticket_number)).where(
+                    QuizResult.ticket_number.isnot(None)
+                )
+            )
+            min_raffle = await session.scalar(
+                select(func.min(RaffleParticipant.ticket_number)).where(
+                    RaffleParticipant.ticket_number.isnot(None)
+                )
+            )
+            max_raffle = await session.scalar(
+                select(func.max(RaffleParticipant.ticket_number)).where(
+                    RaffleParticipant.ticket_number.isnot(None)
+                )
+            )
+            
+            min_ticket = None
+            max_ticket = None
+            if min_quiz is not None:
+                min_ticket = min_quiz
+            if min_raffle is not None:
+                if min_ticket is None or min_raffle < min_ticket:
+                    min_ticket = min_raffle
+            
+            if max_quiz is not None:
+                max_ticket = max_quiz
+            if max_raffle is not None:
+                if max_ticket is None or max_raffle > max_ticket:
+                    max_ticket = max_raffle
+            
+            # Проверка на дубли
+            duplicate_check = await session.execute(
+                select(
+                    QuizResult.ticket_number,
+                    func.count(QuizResult.ticket_number).label('count')
+                ).where(
+                    QuizResult.ticket_number.isnot(None)
+                ).group_by(QuizResult.ticket_number).having(func.count(QuizResult.ticket_number) > 1)
+            )
+            quiz_duplicates = duplicate_check.all()
+            
+            duplicate_check_raffle = await session.execute(
+                select(
+                    RaffleParticipant.ticket_number,
+                    func.count(RaffleParticipant.ticket_number).label('count')
+                ).where(
+                    RaffleParticipant.ticket_number.isnot(None)
+                ).group_by(RaffleParticipant.ticket_number).having(func.count(RaffleParticipant.ticket_number) > 1)
+            )
+            raffle_duplicates = duplicate_check_raffle.all()
+            
+            # Билетики по датам (последние 7 дней)
+            from datetime import datetime, timedelta
+            seven_days_ago = datetime.now() - timedelta(days=7)
+            
+            recent_quiz_tickets = await session.scalar(
+                select(func.count(QuizResult.ticket_number)).where(
+                    and_(
+                        QuizResult.ticket_number.isnot(None),
+                        QuizResult.completed_at >= seven_days_ago
+                    )
+                )
+            )
+            
+            text = (
+                f"🎟 <b>Статистика по билетикам:</b>\n\n"
+                f"📊 <b>Общая статистика:</b>\n"
+                f"Всего билетиков: {total_tickets}\n"
+                f"  • Из квизов: {total_quiz_tickets or 0}\n"
+                f"  • Из розыгрышей: {total_raffle_tickets or 0}\n\n"
+            )
+            
+            if min_ticket is not None and max_ticket is not None:
+                text += f"📈 <b>Диапазон номеров:</b>\n"
+                text += f"Минимальный: №{min_ticket}\n"
+                text += f"Максимальный: №{max_ticket}\n\n"
+            
+            text += f"📅 <b>За последние 7 дней:</b>\n"
+            text += f"Выдано билетиков: {recent_quiz_tickets or 0}\n\n"
+            
+            # Дубли
+            total_duplicates = len(quiz_duplicates) + len(raffle_duplicates)
+            if total_duplicates > 0:
+                text += f"⚠️ <b>Обнаружено дублей:</b> {total_duplicates}\n"
+                if quiz_duplicates:
+                    text += f"  • В квизах: {len(quiz_duplicates)}\n"
+                if raffle_duplicates:
+                    text += f"  • В розыгрышах: {len(raffle_duplicates)}\n"
+                text += f"\n💡 Используй /find_duplicates для деталей\n"
+            else:
+                text += f"✅ Дублей не обнаружено\n"
+            
+            await message.answer(text, parse_mode="HTML")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при получении статистики билетиков: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("system_health"))
+async def cmd_system_health(message: types.Message):
+    """Проверка состояния системы"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        from datetime import datetime, timedelta
+        from scheduler import scheduler
+        
+        async with AsyncSessionLocal() as session:
+            from sqlalchemy import func
+            
+            # Активные пользователи (за последние 24 часа)
+            day_ago = datetime.now() - timedelta(days=1)
+            active_users = await session.scalar(
+                select(func.count(func.distinct(User.id))).where(
+                    User.created_at >= day_ago
+                )
+            )
+            
+            # Всего пользователей
+            total_users = await session.scalar(select(func.count(User.id)))
+            subscribed_users = await session.scalar(
+                select(func.count(User.id)).where(User.subscribed == True)
+            )
+            
+            # Статус scheduler
+            scheduler_status = "✅ Работает" if scheduler and scheduler.running else "❌ Остановлен"
+            
+            # Последние ошибки (из хранилища)
+            recent_errors_count = len([e for e in recent_errors if (datetime.now() - e['time']).total_seconds() < 3600])
+            
+            # Проверка базы данных
+            try:
+                await session.execute(select(1))
+                db_status = "✅ Подключена"
+            except Exception as e:
+                db_status = f"❌ Ошибка: {str(e)[:50]}"
+            
+            text = (
+                f"🏥 <b>Состояние системы:</b>\n\n"
+                f"👥 <b>Пользователи:</b>\n"
+                f"Всего: {total_users or 0}\n"
+                f"Подписанных: {subscribed_users or 0}\n"
+                f"Новых за 24ч: {active_users or 0}\n\n"
+                f"⏰ <b>Scheduler:</b> {scheduler_status}\n\n"
+                f"💾 <b>База данных:</b> {db_status}\n\n"
+                f"⚠️ <b>Ошибки:</b>\n"
+                f"За последний час: {recent_errors_count}\n"
+                f"Всего в логе: {len(recent_errors)}\n\n"
+            )
+            
+            # Проверка критических компонентов
+            issues = []
+            if recent_errors_count > 10:
+                issues.append("⚠️ Много ошибок за последний час")
+            if not scheduler or not scheduler.running:
+                issues.append("⚠️ Scheduler не работает")
+            
+            if issues:
+                text += f"🔴 <b>Проблемы:</b>\n"
+                for issue in issues:
+                    text += f"{issue}\n"
+            else:
+                text += f"✅ <b>Все системы работают нормально</b>"
+            
+            await message.answer(text, parse_mode="HTML")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при проверке состояния системы: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("recent_errors"))
+async def cmd_recent_errors(message: types.Message):
+    """Последние ошибки в системе"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split()
+        limit = int(parts[1]) if len(parts) > 1 else 10
+        
+        if limit > 50:
+            limit = 50
+        
+        if not recent_errors:
+            await message.answer("✅ Ошибок не обнаружено")
+            return
+        
+        # Берем последние N ошибок
+        errors_to_show = recent_errors[-limit:]
+        errors_to_show.reverse()  # Показываем от новых к старым
+        
+        text = f"⚠️ <b>Последние {len(errors_to_show)} ошибок:</b>\n\n"
+        
+        for i, error in enumerate(errors_to_show, 1):
+            time_str = error['time'].strftime("%d.%m.%Y %H:%M:%S")
+            text += f"{i}. <b>{time_str}</b>\n"
+            error_msg = error['message'][:200]  # Ограничиваем длину
+            if len(error['message']) > 200:
+                error_msg += "..."
+            text += f"   {error_msg}\n\n"
+        
+        if len(recent_errors) > limit:
+            text += f"\n... и еще {len(recent_errors) - limit} ошибок в логе"
+        
+        await message.answer(text, parse_mode="HTML")
+        
+    except ValueError:
+        await message.answer("❌ Неверный формат. Используй: /recent_errors [количество]")
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка ошибок: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("daily_report"))
+async def cmd_daily_report(message: types.Message):
+    """Ежедневный отчет"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        from datetime import datetime, timedelta
+        today = datetime.now().date()
+        yesterday = today - timedelta(days=1)
+        
+        async with AsyncSessionLocal() as session:
+            from sqlalchemy import func
+            
+            # Новые пользователи за сегодня
+            new_users_today = await session.scalar(
+                select(func.count(User.id)).where(
+                    func.date(User.created_at) == today
+                )
+            )
+            
+            # Билетики за сегодня
+            tickets_today_quiz = await session.scalar(
+                select(func.count(QuizResult.ticket_number)).where(
+                    and_(
+                        QuizResult.ticket_number.isnot(None),
+                        func.date(QuizResult.completed_at) == today
+                    )
+                )
+            )
+            
+            tickets_today_raffle = await session.scalar(
+                select(func.count(RaffleParticipant.ticket_number)).where(
+                    and_(
+                        RaffleParticipant.ticket_number.isnot(None),
+                        func.date(RaffleParticipant.timestamp) == today
+                    )
+                )
+            )
+            
+            # Активность квизов
+            quiz_participants_today = await session.scalar(
+                select(func.count(QuizResult.id)).where(
+                    func.date(QuizResult.completed_at) == today
+                )
+            )
+            
+            # Активность розыгрышей
+            raffle_participants_today = await session.scalar(
+                select(func.count(RaffleParticipant.id)).where(
+                    func.date(RaffleParticipant.timestamp) == today
+                )
+            )
+            
+            # Ошибки за сегодня
+            errors_today = len([e for e in recent_errors if e['time'].date() == today])
+            
+            text = (
+                f"📊 <b>Ежедневный отчет за {today.strftime('%d.%m.%Y')}</b>\n\n"
+                f"👥 <b>Пользователи:</b>\n"
+                f"Новых: {new_users_today or 0}\n\n"
+                f"🎟 <b>Билетики:</b>\n"
+                f"Выдано: {(tickets_today_quiz or 0) + (tickets_today_raffle or 0)}\n"
+                f"  • Из квизов: {tickets_today_quiz or 0}\n"
+                f"  • Из розыгрышей: {tickets_today_raffle or 0}\n\n"
+                f"🎯 <b>Активность:</b>\n"
+                f"Участников квизов: {quiz_participants_today or 0}\n"
+                f"Участников розыгрышей: {raffle_participants_today or 0}\n\n"
+                f"⚠️ <b>Ошибки:</b> {errors_today}\n\n"
+            )
+            
+            # Сравнение с вчера
+            new_users_yesterday = await session.scalar(
+                select(func.count(User.id)).where(
+                    func.date(User.created_at) == yesterday
+                )
+            )
+            
+            if new_users_yesterday:
+                change = ((new_users_today or 0) - new_users_yesterday) / new_users_yesterday * 100
+                if change > 0:
+                    text += f"📈 Новых пользователей: +{change:.1f}% к вчера\n"
+                elif change < 0:
+                    text += f"📉 Новых пользователей: {change:.1f}% к вчера\n"
+            
+            await message.answer(text, parse_mode="HTML")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при формировании ежедневного отчета: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("weekly_report"))
+async def cmd_weekly_report(message: types.Message):
+    """Еженедельный отчет"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        from datetime import datetime, timedelta
+        today = datetime.now().date()
+        week_ago = today - timedelta(days=7)
+        
+        async with AsyncSessionLocal() as session:
+            from sqlalchemy import func
+            
+            # Новые пользователи за неделю
+            new_users_week = await session.scalar(
+                select(func.count(User.id)).where(
+                    User.created_at >= datetime.combine(week_ago, datetime.min.time())
+                )
+            )
+            
+            # Билетики за неделю
+            tickets_week_quiz = await session.scalar(
+                select(func.count(QuizResult.ticket_number)).where(
+                    and_(
+                        QuizResult.ticket_number.isnot(None),
+                        QuizResult.completed_at >= datetime.combine(week_ago, datetime.min.time())
+                    )
+                )
+            )
+            
+            tickets_week_raffle = await session.scalar(
+                select(func.count(RaffleParticipant.ticket_number)).where(
+                    and_(
+                        RaffleParticipant.ticket_number.isnot(None),
+                        RaffleParticipant.timestamp >= datetime.combine(week_ago, datetime.min.time())
+                    )
+                )
+            )
+            
+            # Активность
+            quiz_participants_week = await session.scalar(
+                select(func.count(QuizResult.id)).where(
+                    QuizResult.completed_at >= datetime.combine(week_ago, datetime.min.time())
+                )
+            )
+            
+            raffle_participants_week = await session.scalar(
+                select(func.count(RaffleParticipant.id)).where(
+                    RaffleParticipant.timestamp >= datetime.combine(week_ago, datetime.min.time())
+                )
+            )
+            
+            # Ошибки за неделю
+            errors_week = len([e for e in recent_errors if e['time'].date() >= week_ago])
+            
+            # Средние значения в день
+            avg_new_users = (new_users_week or 0) / 7
+            avg_tickets = ((tickets_week_quiz or 0) + (tickets_week_raffle or 0)) / 7
+            avg_errors = errors_week / 7
+            
+            text = (
+                f"📊 <b>Еженедельный отчет</b>\n"
+                f"Период: {week_ago.strftime('%d.%m.%Y')} - {today.strftime('%d.%m.%Y')}\n\n"
+                f"👥 <b>Пользователи:</b>\n"
+                f"Новых за неделю: {new_users_week or 0}\n"
+                f"В среднем в день: {avg_new_users:.1f}\n\n"
+                f"🎟 <b>Билетики:</b>\n"
+                f"Выдано за неделю: {(tickets_week_quiz or 0) + (tickets_week_raffle or 0)}\n"
+                f"  • Из квизов: {tickets_week_quiz or 0}\n"
+                f"  • Из розыгрышей: {tickets_week_raffle or 0}\n"
+                f"В среднем в день: {avg_tickets:.1f}\n\n"
+                f"🎯 <b>Активность:</b>\n"
+                f"Участников квизов: {quiz_participants_week or 0}\n"
+                f"Участников розыгрышей: {raffle_participants_week or 0}\n\n"
+                f"⚠️ <b>Ошибки:</b>\n"
+                f"За неделю: {errors_week}\n"
+                f"В среднем в день: {avg_errors:.1f}\n"
+            )
+            
+            await message.answer(text, parse_mode="HTML")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при формировании еженедельного отчета: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка: {e}")
 
 @dp.message()
