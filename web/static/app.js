@@ -116,7 +116,7 @@ async function loadDashboard() {
                                         <td>${user.id}</td>
                                         <td>${user.username || '-'}</td>
                                         <td>${user.first_name || '-'}</td>
-                                        <td>${user.zodiac || '-'}</td>
+                                        <td>${user.zodiac_name || user.zodiac || '-'}</td>
                                         <td>${user.created_at ? new Date(user.created_at).toLocaleString('ru-RU') : '-'}</td>
                                     </tr>
                                 `).join('')}
@@ -642,7 +642,7 @@ async function loadUsers(page = 0) {
                         <th>Имя</th>
                         <th>Знак</th>
                         <th>Подписан</th>
-                        <th>Зарегистрирован</th>
+                        ${!showingRegistered ? '<th>Зарегистрирован</th>' : ''}
                         <th>Действия</th>
                     </tr>
                 </thead>
@@ -652,9 +652,9 @@ async function loadUsers(page = 0) {
                             <td>${user.id}</td>
                             <td>${user.username || '-'}</td>
                             <td>${user.first_name || '-'}</td>
-                            <td>${user.zodiac || '-'}</td>
+                            <td>${user.zodiac_name || user.zodiac || '-'}</td>
                             <td>${user.subscribed ? '✅' : '❌'}</td>
-                            <td>${user.registration_completed ? '✅' : '❌'}</td>
+                            ${!showingRegistered ? `<td>${user.registration_completed ? '✅' : '❌'}</td>` : ''}
                             <td>
                                 <button class="btn btn-sm btn-info" onclick="viewUserTickets(${user.id})">🎟 Билетики</button>
                             </td>
@@ -696,7 +696,7 @@ function viewUserDetails(user) {
                     <div class="modal-body">
                         <p><strong>Username:</strong> ${user.username || '-'}</p>
                         <p><strong>Имя:</strong> ${user.first_name || '-'}</p>
-                        <p><strong>Знак зодиака:</strong> ${user.zodiac || '-'}</p>
+                        <p><strong>Знак зодиака:</strong> ${user.zodiac_name || user.zodiac || '-'}</p>
                         <p><strong>Подписан:</strong> ${user.subscribed ? '✅' : '❌'}</p>
                         <p><strong>Зарегистрирован:</strong> ${user.registration_completed ? '✅' : '❌'}</p>
                         <p><strong>Создан:</strong> ${user.created_at ? new Date(user.created_at).toLocaleString('ru-RU') : '-'}</p>

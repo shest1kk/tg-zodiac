@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select, func
 from database import AsyncSessionLocal, User
 from web.auth import get_current_user
+from config import ZODIAC_NAMES
 
 router = APIRouter()
 
@@ -51,11 +52,16 @@ async def get_new_users(
         
         result = []
         for user in users:
+            zodiac_name = None
+            if user.zodiac:
+                zodiac_name = ZODIAC_NAMES.get(user.zodiac, f"Знак #{user.zodiac}")
+            
             result.append({
                 "id": user.id,
                 "username": user.username,
                 "first_name": user.first_name,
                 "zodiac": user.zodiac,
+                "zodiac_name": zodiac_name,
                 "subscribed": user.subscribed,
                 "registration_completed": user.registration_completed,
                 "created_at": user.created_at.isoformat() if user.created_at else None
@@ -84,11 +90,16 @@ async def get_registered_users(
         
         result = []
         for user in users:
+            zodiac_name = None
+            if user.zodiac:
+                zodiac_name = ZODIAC_NAMES.get(user.zodiac, f"Знак #{user.zodiac}")
+            
             result.append({
                 "id": user.id,
                 "username": user.username,
                 "first_name": user.first_name,
                 "zodiac": user.zodiac,
+                "zodiac_name": zodiac_name,
                 "subscribed": user.subscribed,
                 "created_at": user.created_at.isoformat() if user.created_at else None
             })
@@ -117,11 +128,16 @@ async def get_users(
         
         result = []
         for user in users:
+            zodiac_name = None
+            if user.zodiac:
+                zodiac_name = ZODIAC_NAMES.get(user.zodiac, f"Знак #{user.zodiac}")
+            
             result.append({
                 "id": user.id,
                 "username": user.username,
                 "first_name": user.first_name,
                 "zodiac": user.zodiac,
+                "zodiac_name": zodiac_name,
                 "subscribed": user.subscribed,
                 "registration_completed": user.registration_completed,
                 "created_at": user.created_at.isoformat() if user.created_at else None
@@ -142,11 +158,16 @@ async def get_user(user_id: int, username: str = Depends(get_current_user)):
         if not user:
             raise HTTPException(status_code=404, detail="Пользователь не найден")
         
+        zodiac_name = None
+        if user.zodiac:
+            zodiac_name = ZODIAC_NAMES.get(user.zodiac, f"Знак #{user.zodiac}")
+        
         return {
             "id": user.id,
             "username": user.username,
             "first_name": user.first_name,
             "zodiac": user.zodiac,
+            "zodiac_name": zodiac_name,
             "subscribed": user.subscribed,
             "registration_completed": user.registration_completed,
             "registration_status": user.registration_status,
