@@ -12,7 +12,7 @@ router = APIRouter()
 async def get_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    admin_id: int = Depends(verify_admin)
+    username: str = Depends(verify_admin)
 ):
     """Получить список пользователей"""
     async with AsyncSessionLocal() as session:

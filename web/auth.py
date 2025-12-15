@@ -1,47 +1,26 @@
 """
 Модуль аутентификации для веб-интерфейса
 """
-from fastapi import HTTPException, Depends, status
+from fastapi import HTTPException, Depends, status, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from config import ADMIN_IDS
+from starlette.middleware.sessions import SessionMiddleware
+import os
 
-security = HTTPBasic()
+# Настройки авторизации из переменных окружения
+WEB_ADMIN_LOGIN = os.getenv("WEB_ADMIN_LOGIN", "admin")
+WEB_ADMIN_PASSWORD = os.getenv("WEB_ADMIN_PASSWORD", "admin")
 
-def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
-    """Проверяет, является ли пользователь админом"""
-    if not ADMIN_IDS:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Администраторы не настроены"
-        )
-    
-    # Простая проверка по ID (в реальном приложении лучше использовать токены)
-    # Для веб-интерфейса можно использовать пароль из env
-    import os
-    web_password = os.getenv("WEB_ADMIN_PASSWORD", "admin")
-    
-    # Проверяем пароль
-    if credentials.password != web_password:
+def verify_admin(request: Request):
+    """Проверяет, авторизован ли пользователь через сессию"""
+    if not request.session.get("authenticated"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный пароль",
-            headers={"WWW-Authenticate": "Basic"},
+            detail="Требуется авторизация"
         )
     
-    # Проверяем, что username - это ID админа
-    try:
-        admin_id = int(credentials.username)
-        if admin_id not in ADMIN_IDS:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Доступ запрещен"
-            )
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный формат ID",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    
-    return admin_id
+    return request.session.get("username")
+
+def verify_login(login: str, password: str) -> bool:
+    """Проверяет логин и пароль"""
+    return login == WEB_ADMIN_LOGIN and password == WEB_ADMIN_PASSWORD
 

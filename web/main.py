@@ -1,14 +1,16 @@
 """
 FastAPI веб-сервер для управления ботом
 """
-from fastapi import FastAPI, Request, Depends, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request, Depends, HTTPException, Form
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
 from contextlib import asynccontextmanager
 from pathlib import Path
+import secrets
 
-from web.auth import verify_admin
+from web.auth import verify_admin, verify_login
 from web.routes import tickets, users, quiz, raffle, stats
 
 # Глобальные переменные для доступа к боту и dispatcher
@@ -46,6 +48,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Добавляем middleware для сессий
+app.add_middleware(SessionMiddleware, secret_key=secrets.token_urlsafe(32))
+
 # Подключаем статические файлы и шаблоны
 base_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
@@ -58,10 +63,38 @@ app.include_router(quiz.router, prefix="/api/quiz", tags=["quiz"])
 app.include_router(raffle.router, prefix="/api/raffle", tags=["raffle"])
 app.include_router(stats.router, prefix="/api/stats", tags=["stats"])
 
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    """Страница входа"""
+    # Если уже авторизован, перенаправляем на главную
+    if request.session.get("authenticated"):
+        return RedirectResponse(url="/", status_code=303)
+    return templates.TemplateResponse("login.html", {"request": request})
+
+@app.post("/login")
+async def login(request: Request, login: str = Form(...), password: str = Form(...)):
+    """Обработка входа"""
+    if verify_login(login, password):
+        request.session["authenticated"] = True
+        request.session["username"] = login
+        return RedirectResponse(url="/", status_code=303)
+    else:
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "Неверный логин или пароль"},
+            status_code=401
+        )
+
+@app.get("/logout")
+async def logout(request: Request):
+    """Выход из системы"""
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=303)
+
 @app.get("/", response_class=HTMLResponse)
-async def root(request: Request, admin_id: int = Depends(verify_admin)):
+async def root(request: Request, username: str = Depends(verify_admin)):
     """Главная страница админ-панели"""
-    return templates.TemplateResponse("index.html", {"request": request, "admin_id": admin_id})
+    return templates.TemplateResponse("index.html", {"request": request, "username": username})
 
 @app.get("/health")
 async def health():

@@ -9,14 +9,14 @@ from web.auth import verify_admin
 router = APIRouter()
 
 @router.get("/dates")
-async def get_quiz_dates(admin_id: int = Depends(verify_admin)):
+async def get_quiz_dates(username: str = Depends(verify_admin)):
     """Получить список дат квизов"""
     from quiz import get_all_quiz_dates
     dates = get_all_quiz_dates()
     return {"dates": dates}
 
 @router.get("/{quiz_date}/stats")
-async def get_quiz_stats(quiz_date: str, admin_id: int = Depends(verify_admin)):
+async def get_quiz_stats(quiz_date: str, username: str = Depends(verify_admin)):
     """Получить статистику по квизу"""
     async with AsyncSessionLocal() as session:
         # Все участники
@@ -71,7 +71,7 @@ async def get_quiz_participants(
     quiz_date: str,
     skip: int = 0,
     limit: int = 50,
-    admin_id: int = Depends(verify_admin)
+    username: str = Depends(verify_admin)
 ):
     """Получить список участников квиза"""
     async with AsyncSessionLocal() as session:

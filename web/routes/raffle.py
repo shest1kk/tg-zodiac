@@ -9,14 +9,14 @@ from web.auth import verify_admin
 router = APIRouter()
 
 @router.get("/dates")
-async def get_raffle_dates(admin_id: int = Depends(verify_admin)):
+async def get_raffle_dates(username: str = Depends(verify_admin)):
     """Получить список дат розыгрышей"""
     from raffle import get_all_raffle_dates
     dates = get_all_raffle_dates()
     return {"dates": dates}
 
 @router.get("/{raffle_date}/stats")
-async def get_raffle_stats(raffle_date: str, admin_id: int = Depends(verify_admin)):
+async def get_raffle_stats(raffle_date: str, username: str = Depends(verify_admin)):
     """Получить статистику по розыгрышу"""
     async with AsyncSessionLocal() as session:
         # Все участники
@@ -70,7 +70,7 @@ async def get_unchecked_answers(
     raffle_date: str,
     skip: int = 0,
     limit: int = 50,
-    admin_id: int = Depends(verify_admin)
+    username: str = Depends(verify_admin)
 ):
     """Получить список непроверенных ответов"""
     from raffle import get_unchecked_answers as get_unchecked
@@ -98,7 +98,7 @@ async def get_unchecked_answers(
 async def approve_answer(
     raffle_date: str,
     user_id: int,
-    admin_id: int = Depends(verify_admin)
+    username: str = Depends(verify_admin)
 ):
     """Одобрить ответ пользователя"""
     from raffle import approve_answer as approve
@@ -113,7 +113,7 @@ async def approve_answer(
 async def deny_answer(
     raffle_date: str,
     user_id: int,
-    admin_id: int = Depends(verify_admin)
+    username: str = Depends(verify_admin)
 ):
     """Отклонить ответ пользователя"""
     from raffle import deny_answer as deny

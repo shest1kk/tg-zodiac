@@ -9,7 +9,7 @@ from web.auth import verify_admin
 router = APIRouter()
 
 @router.get("/stats")
-async def get_ticket_stats(admin_id: int = Depends(verify_admin)):
+async def get_ticket_stats(username: str = Depends(verify_admin)):
     """Получить статистику по билетикам"""
     async with AsyncSessionLocal() as session:
         # Общее количество
@@ -106,7 +106,7 @@ async def get_ticket_stats(admin_id: int = Depends(verify_admin)):
         }
 
 @router.get("/duplicates")
-async def get_duplicates(admin_id: int = Depends(verify_admin)):
+async def get_duplicates(username: str = Depends(verify_admin)):
     """Получить список всех дублей"""
     async with AsyncSessionLocal() as session:
         # Дубли в квизах
@@ -189,7 +189,7 @@ async def get_duplicates(admin_id: int = Depends(verify_admin)):
         return {"duplicates": duplicates}
 
 @router.delete("/{user_id}/{ticket_number}")
-async def remove_ticket(user_id: int, ticket_number: int, admin_id: int = Depends(verify_admin)):
+async def remove_ticket(user_id: int, ticket_number: int, username: str = Depends(verify_admin)):
     """Удалить билетик у пользователя"""
     async with AsyncSessionLocal() as session:
         # Ищем в квизах
@@ -227,7 +227,7 @@ async def remove_ticket(user_id: int, ticket_number: int, admin_id: int = Depend
         return {"success": True, "message": f"Билетик №{ticket_number} удален у пользователя {user_id}"}
 
 @router.get("/user/{user_id}")
-async def get_user_tickets(user_id: int, admin_id: int = Depends(verify_admin)):
+async def get_user_tickets(user_id: int, username: str = Depends(verify_admin)):
     """Получить все билетики пользователя"""
     async with AsyncSessionLocal() as session:
         quiz_tickets = await session.execute(
@@ -270,7 +270,7 @@ async def get_user_tickets(user_id: int, admin_id: int = Depends(verify_admin)):
         return {"user_id": user_id, "tickets": tickets}
 
 @router.get("/check_time/{ticket_number}")
-async def check_ticket_time(ticket_number: int, admin_id: int = Depends(verify_admin)):
+async def check_ticket_time(ticket_number: int, username: str = Depends(verify_admin)):
     """Проверить время выдачи билетика"""
     from datetime import datetime, timezone, timedelta
     
