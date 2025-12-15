@@ -4880,7 +4880,8 @@ async def cmd_check_ticket_time(message: types.Message):
                     'source': 'квиз',
                     'date': date_display,
                     'time': ticket.completed_at,
-                    'time_display': time_display
+                    'time_display': time_display,
+                    'db_id': ticket.id  # ID записи в БД для определения порядка при одинаковом времени
                 })
             
             # Добавляем розыгрыши
@@ -4911,21 +4912,35 @@ async def cmd_check_ticket_time(message: types.Message):
                     'source': 'розыгрыш',
                     'date': date_display,
                     'time': ticket.timestamp,  # Используем timestamp как приблизительное время
-                    'time_display': time_display
+                    'time_display': time_display,
+                    'db_id': ticket.id  # ID записи в БД для определения порядка при одинаковом времени
                 })
             
-            # Сортируем по времени
-            all_tickets.sort(key=lambda x: x['time'] if x['time'] else datetime.min.replace(tzinfo=timezone.utc))
+            # Сортируем по времени, затем по ID записи (для случаев одинакового времени)
+            all_tickets.sort(key=lambda x: (
+                x['time'] if x['time'] else datetime.min.replace(tzinfo=timezone.utc),
+                x.get('db_id', 0)
+            ))
+            
+            # Проверяем, есть ли одинаковое время
+            same_time = len(all_tickets) > 1 and all_tickets[0]['time'] == all_tickets[1]['time']
             
             # Формируем текст
             for i, ticket_info in enumerate(all_tickets, 1):
                 text += f"{i}. <b>ID {ticket_info['user_id']}</b>\n"
                 text += f"   📅 {ticket_info['source']} ({ticket_info['date']})\n"
-                text += f"   ⏰ {ticket_info['time_display']}\n\n"
+                text += f"   ⏰ {ticket_info['time_display']}\n"
+                if 'db_id' in ticket_info:
+                    text += f"   🆔 ID записи в БД: {ticket_info['db_id']}\n"
+                text += "\n"
             
             if len(all_tickets) > 1:
                 first = all_tickets[0]
-                text += f"🏆 <b>Первым получил:</b> ID {first['user_id']} ({first['source']})"
+                if same_time:
+                    text += f"⚠️ <b>Внимание:</b> Оба пользователя получили билетик в одно и то же время!\n"
+                    text += f"🏆 Первым по порядку в БД: ID {first['user_id']} ({first['source']})"
+                else:
+                    text += f"🏆 <b>Первым получил:</b> ID {first['user_id']} ({first['source']})"
             
             await message.answer(text, parse_mode="HTML")
                 
