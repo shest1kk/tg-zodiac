@@ -169,12 +169,22 @@ def update_quiz_question(question_id: int, quiz_date: str, question_text: str, o
         return False
     
     questions = quiz_dates[quiz_date]
+    # Ищем вопрос по ID или по ключу
+    question_found = False
     for question_key, question in questions.items():
-        if question.get("id") == question_id:
+        # Проверяем по ID (может быть число или строка)
+        question_id_in_data = question.get("id")
+        if (question_id_in_data == question_id or 
+            str(question_id_in_data) == str(question_id) or
+            str(question_key) == str(question_id)):
             question["question"] = question_text
             question["options"] = options
             question["correct_answer"] = correct_answer
-            return save_quiz_data(all_data)
+            question_found = True
+            break
+    
+    if question_found:
+        return save_quiz_data(all_data)
     
     return False
 

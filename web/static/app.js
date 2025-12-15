@@ -303,8 +303,187 @@ async function toggleQuizDate(quizDate) {
 }
 
 async function editQuizQuestion(quizDate, questionId) {
-    // TODO: Реализовать модальное окно для редактирования
-    alert(`Редактирование вопроса ${questionId} квиза ${quizDate} (в разработке)`);
+    try {
+        // Получаем данные вопроса
+        const questionsData = await apiFetch(`/quiz/${quizDate}/questions`);
+        const question = questionsData.questions.find(q => q.id === questionId || q.id === parseInt(questionId));
+        
+        if (!question) {
+            alert('Вопрос не найден');
+            return;
+        }
+        
+        // Подготавливаем данные для формы
+        const questionText = (question.question || question.question_text || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        const options = question.options || {};
+        
+        // Преобразуем options в массив, если это объект
+        let optionsArray = [];
+        if (typeof options === 'object' && !Array.isArray(options)) {
+            // Если это объект с ключами "1", "2", "3", "4"
+            const keys = Object.keys(options).sort();
+            optionsArray = keys.map(key => ({
+                key: key,
+                value: String(options[key] || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+            }));
+        } else if (Array.isArray(options)) {
+            optionsArray = options.map((opt, idx) => ({
+                key: String(idx + 1),
+                value: String(opt || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+            }));
+        } else {
+            // Если options нет, создаем пустые
+            optionsArray = [
+                { key: '1', value: '' },
+                { key: '2', value: '' },
+                { key: '3', value: '' },
+                { key: '4', value: '' }
+            ];
+        }
+        
+        // Заполняем до 4 вариантов
+        while (optionsArray.length < 4) {
+            optionsArray.push({ key: String(optionsArray.length + 1), value: '' });
+        }
+        
+        const correctAnswer = String(question.correct_answer || question.correct || '1');
+        
+        // Создаем модальное окно
+        const modalHtml = `
+            <div class="modal fade" id="editQuizQuestionModal" tabindex="-1">
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">✏️ Редактирование вопроса #${questionId}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <form id="editQuizQuestionForm">
+                                <div class="mb-3">
+                                    <label for="questionText" class="form-label">Текст вопроса</label>
+                                    <textarea class="form-control" id="questionText" rows="3" required>${questionText}</textarea>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <label class="form-label">Варианты ответов</label>
+                                    ${optionsArray.map((opt, idx) => `
+                                        <div class="input-group mb-2">
+                                            <span class="input-group-text">${opt.key}</span>
+                                            <input type="text" class="form-control option-input" 
+                                                   data-key="${opt.key}" 
+                                                   value="${opt.value}" 
+                                                   placeholder="Вариант ответа ${opt.key}" required>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <label class="form-label">Правильный ответ</label>
+                                    <select class="form-select" id="correctAnswer" required>
+                                        ${optionsArray.map(opt => `
+                                            <option value="${opt.key}" ${opt.key === correctAnswer ? 'selected' : ''}>
+                                                ${opt.key}
+                                            </option>
+                                        `).join('')}
+                                    </select>
+                                </div>
+                            </form>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                            <button type="button" class="btn btn-primary" onclick="saveQuizQuestion('${quizDate}', ${questionId})">💾 Сохранить</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        // Удаляем предыдущее модальное окно, если есть
+        const existingModal = document.getElementById('editQuizQuestionModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+        
+        // Добавляем новое модальное окно
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const bsModal = new bootstrap.Modal(document.getElementById('editQuizQuestionModal'));
+        bsModal.show();
+        
+        // Удаляем модальное окно после закрытия
+        document.getElementById('editQuizQuestionModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    } catch (error) {
+        alert('Ошибка при загрузке вопроса: ' + error.message);
+    }
+}
+
+async function saveQuizQuestion(quizDate, questionId) {
+    try {
+        const form = document.getElementById('editQuizQuestionForm');
+        if (!form.checkValidity()) {
+            form.reportValidity();
+            return;
+        }
+        
+        const questionText = document.getElementById('questionText').value.trim();
+        if (!questionText) {
+            alert('Введите текст вопроса');
+            return;
+        }
+        
+        // Собираем варианты ответов
+        const optionInputs = document.querySelectorAll('.option-input');
+        const options = {};
+        optionInputs.forEach(input => {
+            const key = input.dataset.key;
+            const value = input.value.trim();
+            if (value) {
+                options[key] = value;
+            }
+        });
+        
+        if (Object.keys(options).length === 0) {
+            alert('Введите хотя бы один вариант ответа');
+            return;
+        }
+        
+        const correctAnswer = document.getElementById('correctAnswer').value;
+        if (!options[correctAnswer]) {
+            alert('Правильный ответ должен быть одним из вариантов');
+            return;
+        }
+        
+        // Отправляем данные на сервер
+        const response = await apiFetch(`/quiz/${quizDate}/questions/${questionId}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                question_text: questionText,
+                options: options,
+                correct_answer: correctAnswer
+            })
+        });
+        
+        if (response.success) {
+            // Закрываем модальное окно
+            const modal = bootstrap.Modal.getInstance(document.getElementById('editQuizQuestionModal'));
+            if (modal) {
+                modal.hide();
+            }
+            
+            // Обновляем отображение квиза
+            await showQuizDetails(quizDate);
+            
+            alert('✅ Вопрос успешно обновлен!');
+        } else {
+            alert('Ошибка: ' + (response.message || 'Не удалось сохранить вопрос'));
+        }
+    } catch (error) {
+        alert('Ошибка при сохранении: ' + error.message);
+    }
 }
 
 // Розыгрыши
