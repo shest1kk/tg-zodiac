@@ -428,17 +428,37 @@ async def mark_non_participants(quiz_date: str):
 
 
 async def get_next_ticket_number() -> int:
-    """Получает следующий номер билетика (начиная с 101)"""
+    """Получает следующий номер билетика (начиная с 101)
+    Ищет максимальный номер из QuizResult и RaffleParticipant
+    """
     try:
         async with AsyncSessionLocal() as session:
-            # Находим максимальный номер билетика
-            result = await session.execute(
+            # Находим максимальный номер билетика из квизов
+            quiz_result = await session.execute(
                 select(func.max(QuizResult.ticket_number)).where(
                     QuizResult.ticket_number.isnot(None)
                 )
             )
-            max_ticket = result.scalar_one_or_none()
+            max_quiz_ticket = quiz_result.scalar_one_or_none()
             
+            # Находим максимальный номер билетика из розыгрышей
+            from database import RaffleParticipant
+            raffle_result = await session.execute(
+                select(func.max(RaffleParticipant.ticket_number)).where(
+                    RaffleParticipant.ticket_number.isnot(None)
+                )
+            )
+            max_raffle_ticket = raffle_result.scalar_one_or_none()
+            
+            # Берем максимальный из двух
+            max_ticket = None
+            if max_quiz_ticket is not None:
+                max_ticket = max_quiz_ticket
+            if max_raffle_ticket is not None:
+                if max_ticket is None or max_raffle_ticket > max_ticket:
+                    max_ticket = max_raffle_ticket
+            
+            # Если нет билетов, начинаем с 101
             if max_ticket is None:
                 return TICKET_START_NUMBER + 1  # Первый билетик = 101
             

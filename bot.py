@@ -213,6 +213,7 @@ async def cmd_help(message: types.Message):
             "<b>/broadcast</b> - Массовая рассылка\n"
             "<b>/set_prediction</b> - Редактировать предсказания\n"
             "<b>/add_ticket</b> - Выдать билет пользователю\n"
+            "<b>/remove_ticket</b> - Удалить билетик у пользователя\n"
             "<b>/check</b> - Проверить информацию о пользователе\n"
             "<b>/users</b> - Экспорт списка пользователей в CSV\n"
             "<b>/registered</b> - Список зарегистрированных пользователей\n"
@@ -2703,9 +2704,8 @@ async def choose_zodiac(cb: types.CallbackQuery):
                             
                             # Проверяем, что текущее время между началом и окончанием квиза
                             if quiz_start_time <= current_time_moscow < quiz_end_time:
-                                # Создаем или получаем квиз (создаст, если не существует)
-                                from quiz import create_or_get_quiz
-                                quiz = await create_or_get_quiz(current_date_str)
+                                # Получаем квиз (НЕ создаем, если не существует - квиз должен быть создан администратором)
+                                quiz = await get_quiz(current_date_str)
                                 
                                 logger.debug(
                                     f"Квиз для {current_date_str}: существует={quiz is not None}, "
@@ -4533,7 +4533,7 @@ async def callback_approve(cb: types.CallbackQuery):
                                 self.from_user = original_cb.from_user
                                 self.message = original_cb.message
                                 self.data = new_data
-                            def answer(self, *args, **kwargs):
+                            async def answer(self, *args, **kwargs):
                                 pass  # Не вызываем answer дважды
                         
                         fake_cb = FakeCallback(cb, f"admin_unchecked_{raffle_date}")
@@ -4659,7 +4659,7 @@ async def callback_deny(cb: types.CallbackQuery):
                                 self.from_user = original_cb.from_user
                                 self.message = original_cb.message
                                 self.data = new_data
-                            def answer(self, *args, **kwargs):
+                            async def answer(self, *args, **kwargs):
                                 pass  # Не вызываем answer дважды
                         
                         fake_cb = FakeCallback(cb, f"admin_unchecked_{raffle_date}")
@@ -4727,6 +4727,87 @@ async def cmd_deny(message: types.Message):
         await message.answer(f"❌ Неверный формат: {e}")
     except Exception as e:
         logger.error(f"Ошибка при отклонении ответа: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("remove_ticket"))
+async def cmd_remove_ticket(message: types.Message):
+    """Удалить билетик у пользователя (требует обязательный номер билетика)"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 3:
+            await message.answer("❌ Формат: /remove_ticket USER_ID TICKET_NUMBER\n\n"
+                                "⚠️ <b>Внимание:</b> Номер билетика обязателен для предотвращения ошибок!\n\n"
+                                "Пример:\n"
+                                "/remove_ticket 123456789 166 - удалить билетик №166 у пользователя")
+            return
+        
+        user_id = int(parts[1])
+        ticket_number = int(parts[2])
+        
+        async with AsyncSessionLocal() as session:
+            # Ищем билетики в квизах
+            quiz_result = await session.execute(
+                select(QuizResult).where(
+                    and_(
+                        QuizResult.user_id == user_id,
+                        QuizResult.ticket_number == ticket_number
+                    )
+                )
+            )
+            quiz_ticket = quiz_result.scalar_one_or_none()
+            
+            # Ищем билетики в розыгрышах
+            raffle_result = await session.execute(
+                select(RaffleParticipant).where(
+                    and_(
+                        RaffleParticipant.user_id == user_id,
+                        RaffleParticipant.ticket_number == ticket_number
+                    )
+                )
+            )
+            raffle_ticket = raffle_result.scalar_one_or_none()
+            
+            # Удаляем билетик
+            removed = False
+            removed_from = None
+            
+            # Ищем в квизах
+            if quiz_ticket:
+                quiz_ticket.ticket_number = None
+                removed = True
+                try:
+                    date_obj = datetime.strptime(quiz_ticket.quiz_date, "%Y-%m-%d")
+                    date_display = date_obj.strftime("%d.%m.%Y")
+                except:
+                    date_display = quiz_ticket.quiz_date
+                removed_from = f"квиз {date_display}"
+            
+            # Ищем в розыгрышах
+            elif raffle_ticket:
+                raffle_ticket.ticket_number = None
+                removed = True
+                try:
+                    date_obj = datetime.strptime(raffle_ticket.raffle_date, "%Y-%m-%d")
+                    date_display = date_obj.strftime("%d.%m.%Y")
+                except:
+                    date_display = raffle_ticket.raffle_date
+                removed_from = f"розыгрыш {date_display}"
+            
+            if removed:
+                await session.commit()
+                logger.info(f"Админ {message.from_user.id} удалил билетик №{ticket_number} у пользователя {user_id} ({removed_from})")
+                await message.answer(f"✅ Билетик №{ticket_number} удален у пользователя {user_id} ({removed_from})")
+            else:
+                await message.answer(f"❌ Билетик №{ticket_number} не найден у пользователя {user_id}")
+                
+    except ValueError as e:
+        await message.answer(f"❌ Неверный формат: USER_ID и TICKET_NUMBER должны быть числами")
+    except Exception as e:
+        logger.error(f"Ошибка при удалении билетика: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка: {e}")
 
 @dp.message()
