@@ -210,6 +210,7 @@ async def cmd_help(message: types.Message):
             "<b>/admin</b> - Админ-панель\n"
             "<b>/stats</b> - Статистика бота\n"
             "<b>/ticket_stats</b> - Статистика по билетикам\n"
+            "<b>/find_duplicates</b> - Поиск дублей билетиков\n"
             "<b>/system_health</b> - Состояние системы\n"
             "<b>/recent_errors</b> - Последние ошибки\n"
             "<b>/daily_report</b> - Ежедневный отчет\n"
@@ -5112,6 +5113,127 @@ async def cmd_ticket_stats(message: types.Message):
             
     except Exception as e:
         logger.error(f"Ошибка при получении статистики билетиков: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("find_duplicates"))
+async def cmd_find_duplicates(message: types.Message):
+    """Поиск всех дублей билетиков"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен.")
+        return
+    
+    try:
+        async with AsyncSessionLocal() as session:
+            from sqlalchemy import func
+            
+            # Находим дубли в квизах
+            duplicate_quiz_query = await session.execute(
+                select(
+                    QuizResult.ticket_number,
+                    func.count(QuizResult.ticket_number).label('count')
+                ).where(
+                    QuizResult.ticket_number.isnot(None)
+                ).group_by(QuizResult.ticket_number).having(func.count(QuizResult.ticket_number) > 1)
+            )
+            quiz_duplicates = duplicate_quiz_query.all()
+            
+            # Находим дубли в розыгрышах
+            duplicate_raffle_query = await session.execute(
+                select(
+                    RaffleParticipant.ticket_number,
+                    func.count(RaffleParticipant.ticket_number).label('count')
+                ).where(
+                    RaffleParticipant.ticket_number.isnot(None)
+                ).group_by(RaffleParticipant.ticket_number).having(func.count(RaffleParticipant.ticket_number) > 1)
+            )
+            raffle_duplicates = duplicate_raffle_query.all()
+            
+            if not quiz_duplicates and not raffle_duplicates:
+                await message.answer("✅ Дублей билетиков не обнаружено!")
+                return
+            
+            text = "🔁 <b>Дублирующиеся билеты</b>\n\n"
+            
+            # Обрабатываем дубли из квизов
+            for ticket_num, count in quiz_duplicates:
+                text += f"🎟 Билет {ticket_num}\n"
+                
+                # Получаем всех пользователей с этим билетиком
+                users_query = await session.execute(
+                    select(QuizResult).where(QuizResult.ticket_number == ticket_num)
+                )
+                users = users_query.scalars().all()
+                
+                user_ids = [u.user_id for u in users]
+                user_info_list = []
+                for user_id in user_ids:
+                    # Получаем все билетики этого пользователя
+                    user_tickets_query = await session.execute(
+                        select(QuizResult.ticket_number).where(
+                            and_(
+                                QuizResult.user_id == user_id,
+                                QuizResult.ticket_number.isnot(None)
+                            )
+                        ).order_by(QuizResult.ticket_number.asc())
+                    )
+                    user_tickets = [str(t) for t in user_tickets_query.scalars().all()]
+                    user_info_list.append(f"ID {user_id} — {', '.join(user_tickets)}")
+                
+                text += "\n".join(user_info_list)
+                text += "\n\n"
+            
+            # Обрабатываем дубли из розыгрышей
+            for ticket_num, count in raffle_duplicates:
+                text += f"🎟 Билет {ticket_num}\n"
+                
+                # Получаем всех пользователей с этим билетиком
+                users_query = await session.execute(
+                    select(RaffleParticipant).where(RaffleParticipant.ticket_number == ticket_num)
+                )
+                users = users_query.scalars().all()
+                
+                user_ids = [u.user_id for u in users]
+                user_info_list = []
+                for user_id in user_ids:
+                    # Получаем все билетики этого пользователя
+                    user_tickets_quiz = await session.execute(
+                        select(QuizResult.ticket_number).where(
+                            and_(
+                                QuizResult.user_id == user_id,
+                                QuizResult.ticket_number.isnot(None)
+                            )
+                        )
+                    )
+                    user_tickets_raffle = await session.execute(
+                        select(RaffleParticipant.ticket_number).where(
+                            and_(
+                                RaffleParticipant.user_id == user_id,
+                                RaffleParticipant.ticket_number.isnot(None)
+                            )
+                        )
+                    )
+                    all_tickets = [str(t) for t in user_tickets_quiz.scalars().all()]
+                    all_tickets.extend([str(t) for t in user_tickets_raffle.scalars().all()])
+                    all_tickets.sort(key=int)
+                    user_info_list.append(f"ID {user_id} — {', '.join(all_tickets)}")
+                
+                text += "\n".join(user_info_list)
+                text += "\n\n"
+            
+            text += "\n💡 Используй /remove_ticket USER_ID TICKET_NUMBER для удаления дублей"
+            
+            # Разбиваем на части, если сообщение слишком длинное
+            if len(text) > 4000:
+                # Отправляем первую часть
+                await message.answer(text[:4000], parse_mode="HTML")
+                # Отправляем остальное
+                if len(text) > 4000:
+                    await message.answer(text[4000:], parse_mode="HTML")
+            else:
+                await message.answer(text, parse_mode="HTML")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при поиске дублей: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка: {e}")
 
 @dp.message(Command("system_health"))
