@@ -5047,7 +5047,7 @@ async def cmd_ticket_stats(message: types.Message):
                 if max_ticket is None or max_raffle > max_ticket:
                     max_ticket = max_raffle
             
-            # Проверка на дубли
+            # Проверка на дубли внутри таблиц
             duplicate_check = await session.execute(
                 select(
                     QuizResult.ticket_number,
@@ -5067,6 +5067,20 @@ async def cmd_ticket_stats(message: types.Message):
                 ).group_by(RaffleParticipant.ticket_number).having(func.count(RaffleParticipant.ticket_number) > 1)
             )
             raffle_duplicates = duplicate_check_raffle.all()
+            
+            # Проверка на дубли между таблицами (один номер есть и в квизах, и в розыгрышах)
+            quiz_ticket_numbers = await session.execute(
+                select(QuizResult.ticket_number).where(QuizResult.ticket_number.isnot(None)).distinct()
+            )
+            quiz_tickets_set = {t[0] for t in quiz_ticket_numbers.all()}
+            
+            raffle_ticket_numbers = await session.execute(
+                select(RaffleParticipant.ticket_number).where(RaffleParticipant.ticket_number.isnot(None)).distinct()
+            )
+            raffle_tickets_set = {t[0] for t in raffle_ticket_numbers.all()}
+            
+            # Находим пересечение - номера, которые есть в обеих таблицах
+            cross_table_duplicates = list(quiz_tickets_set & raffle_tickets_set)
             
             # Билетики по датам (последние 7 дней)
             from datetime import datetime, timedelta
@@ -5098,13 +5112,15 @@ async def cmd_ticket_stats(message: types.Message):
             text += f"Выдано билетиков: {recent_quiz_tickets or 0}\n\n"
             
             # Дубли
-            total_duplicates = len(quiz_duplicates) + len(raffle_duplicates)
+            total_duplicates = len(quiz_duplicates) + len(raffle_duplicates) + len(cross_table_duplicates)
             if total_duplicates > 0:
                 text += f"⚠️ <b>Обнаружено дублей:</b> {total_duplicates}\n"
                 if quiz_duplicates:
                     text += f"  • В квизах: {len(quiz_duplicates)}\n"
                 if raffle_duplicates:
                     text += f"  • В розыгрышах: {len(raffle_duplicates)}\n"
+                if cross_table_duplicates:
+                    text += f"  • Между таблицами: {len(cross_table_duplicates)}\n"
                 text += f"\n💡 Используй /find_duplicates для деталей\n"
             else:
                 text += f"✅ Дублей не обнаружено\n"
@@ -5148,7 +5164,21 @@ async def cmd_find_duplicates(message: types.Message):
             )
             raffle_duplicates = duplicate_raffle_query.all()
             
-            if not quiz_duplicates and not raffle_duplicates:
+            # Проверка на дубли между таблицами (один номер есть и в квизах, и в розыгрышах)
+            quiz_ticket_numbers = await session.execute(
+                select(QuizResult.ticket_number).where(QuizResult.ticket_number.isnot(None)).distinct()
+            )
+            quiz_tickets_set = {t[0] for t in quiz_ticket_numbers.all()}
+            
+            raffle_ticket_numbers = await session.execute(
+                select(RaffleParticipant.ticket_number).where(RaffleParticipant.ticket_number.isnot(None)).distinct()
+            )
+            raffle_tickets_set = {t[0] for t in raffle_ticket_numbers.all()}
+            
+            # Находим пересечение - номера, которые есть в обеих таблицах
+            cross_table_duplicates = list(quiz_tickets_set & raffle_tickets_set)
+            
+            if not quiz_duplicates and not raffle_duplicates and not cross_table_duplicates:
                 await message.answer("✅ Дублей билетиков не обнаружено!")
                 return
             
@@ -5178,6 +5208,75 @@ async def cmd_find_duplicates(message: types.Message):
                     )
                     user_tickets = [str(t) for t in user_tickets_query.scalars().all()]
                     user_info_list.append(f"ID {user_id} — {', '.join(user_tickets)}")
+                
+                text += "\n".join(user_info_list)
+                text += "\n\n"
+            
+            # Обрабатываем дубли между таблицами (квиз и розыгрыш одновременно)
+            for ticket_num in cross_table_duplicates:
+                text += f"🎟 Билет {ticket_num}\n"
+                
+                # Получаем пользователей из квизов с этим билетиком
+                quiz_users_query = await session.execute(
+                    select(QuizResult).where(QuizResult.ticket_number == ticket_num)
+                )
+                quiz_users = quiz_users_query.scalars().all()
+                
+                # Получаем пользователей из розыгрышей с этим билетиком
+                raffle_users_query = await session.execute(
+                    select(RaffleParticipant).where(RaffleParticipant.ticket_number == ticket_num)
+                )
+                raffle_users = raffle_users_query.scalars().all()
+                
+                user_info_list = []
+                
+                # Обрабатываем пользователей из квизов
+                for user in quiz_users:
+                    user_tickets_quiz = await session.execute(
+                        select(QuizResult.ticket_number).where(
+                            and_(
+                                QuizResult.user_id == user.user_id,
+                                QuizResult.ticket_number.isnot(None)
+                            )
+                        )
+                    )
+                    user_tickets_raffle = await session.execute(
+                        select(RaffleParticipant.ticket_number).where(
+                            and_(
+                                RaffleParticipant.user_id == user.user_id,
+                                RaffleParticipant.ticket_number.isnot(None)
+                            )
+                        )
+                    )
+                    all_tickets = [str(t) for t in user_tickets_quiz.scalars().all()]
+                    all_tickets.extend([str(t) for t in user_tickets_raffle.scalars().all()])
+                    all_tickets.sort(key=int)
+                    user_info_list.append(f"ID {user.user_id} — {', '.join(all_tickets)} (квиз)")
+                
+                # Обрабатываем пользователей из розыгрышей
+                for user in raffle_users:
+                    # Проверяем, не добавили ли уже этого пользователя
+                    if user.user_id not in [u.user_id for u in quiz_users]:
+                        user_tickets_quiz = await session.execute(
+                            select(QuizResult.ticket_number).where(
+                                and_(
+                                    QuizResult.user_id == user.user_id,
+                                    QuizResult.ticket_number.isnot(None)
+                                )
+                            )
+                        )
+                        user_tickets_raffle = await session.execute(
+                            select(RaffleParticipant.ticket_number).where(
+                                and_(
+                                    RaffleParticipant.user_id == user.user_id,
+                                    RaffleParticipant.ticket_number.isnot(None)
+                                )
+                            )
+                        )
+                        all_tickets = [str(t) for t in user_tickets_quiz.scalars().all()]
+                        all_tickets.extend([str(t) for t in user_tickets_raffle.scalars().all()])
+                        all_tickets.sort(key=int)
+                        user_info_list.append(f"ID {user.user_id} — {', '.join(all_tickets)} (розыгрыш)")
                 
                 text += "\n".join(user_info_list)
                 text += "\n\n"
