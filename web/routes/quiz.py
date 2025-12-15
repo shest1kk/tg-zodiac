@@ -1,7 +1,7 @@
 """
 Роуты для управления квизами
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy import select, func, and_
 from database import AsyncSessionLocal, Quiz, QuizResult, QuizParticipant
 from web.auth import verify_admin
@@ -94,4 +94,83 @@ async def get_quiz_participants(
             })
         
         return {"participants": result}
+
+@router.get("/{quiz_date}/questions")
+async def get_quiz_questions(quiz_date: str, username: str = Depends(verify_admin)):
+    """Получить вопросы квиза"""
+    from quiz import get_all_questions
+    questions = get_all_questions(quiz_date)
+    return {"quiz_date": quiz_date, "questions": questions}
+
+@router.put("/{quiz_date}/questions/{question_id}")
+async def update_quiz_question(
+    quiz_date: str,
+    question_id: int,
+    data: dict = Body(...),
+    username: str = Depends(verify_admin)
+):
+    """Обновить вопрос квиза"""
+    from quiz import update_quiz_question as update_question
+    try:
+        question_text = data.get("question_text")
+        options = data.get("options")
+        correct_answer = data.get("correct_answer")
+        # Функция принимает параметры в порядке: question_id, quiz_date, question_text, options, correct_answer
+        result = update_question(question_id, quiz_date, question_text, options, correct_answer)
+        if result:
+            return {"success": True, "message": "Вопрос обновлен"}
+        else:
+            raise HTTPException(status_code=404, detail="Вопрос не найден")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/disabled-dates")
+async def get_disabled_dates(username: str = Depends(verify_admin)):
+    """Получить список отключенных дат квизов"""
+    from pathlib import Path
+    import json
+    import os
+    
+    # Определяем путь к файлу (работает и в Docker, и локально)
+    base_dir = Path(__file__).parent.parent.parent
+    disabled_file = base_dir / "data" / "quiz_disabled_dates.json"
+    
+    if disabled_file.exists():
+        with open(disabled_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {"disabled_dates": data.get("dates", [])}
+    return {"disabled_dates": []}
+
+@router.post("/{quiz_date}/toggle")
+async def toggle_quiz_date(quiz_date: str, username: str = Depends(verify_admin)):
+    """Включить/отключить квиз для даты"""
+    from pathlib import Path
+    import json
+    
+    # Определяем путь к файлу (работает и в Docker, и локально)
+    base_dir = Path(__file__).parent.parent.parent
+    disabled_file = base_dir / "data" / "quiz_disabled_dates.json"
+    
+    # Загружаем текущий список
+    if disabled_file.exists():
+        with open(disabled_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            disabled_dates = set(data.get("dates", []))
+    else:
+        disabled_dates = set()
+    
+    # Переключаем состояние
+    if quiz_date in disabled_dates:
+        disabled_dates.remove(quiz_date)
+        action = "включен"
+    else:
+        disabled_dates.add(quiz_date)
+        action = "отключен"
+    
+    # Сохраняем
+    disabled_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(disabled_file, "w", encoding="utf-8") as f:
+        json.dump({"dates": sorted(list(disabled_dates))}, f, ensure_ascii=False, indent=2)
+    
+    return {"success": True, "message": f"Квиз для {quiz_date} {action}", "disabled": quiz_date not in disabled_dates}
 

@@ -1,7 +1,7 @@
 """
 Роуты для управления розыгрышами
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy import select, func, and_
 from database import AsyncSessionLocal, Raffle, RaffleParticipant
 from web.auth import verify_admin
@@ -123,4 +123,45 @@ async def deny_answer(
         raise HTTPException(status_code=400, detail="Не удалось отклонить ответ")
     
     return {"success": True, "message": f"Ответ пользователя {user_id} отклонен"}
+
+@router.get("/{raffle_date}/questions")
+async def get_raffle_questions(raffle_date: str, username: str = Depends(verify_admin)):
+    """Получить вопросы розыгрыша"""
+    from raffle import get_all_questions
+    questions = get_all_questions(raffle_date)
+    return {"raffle_date": raffle_date, "questions": questions}
+
+@router.get("/{raffle_date}/questions/{question_id}")
+async def get_raffle_question(
+    raffle_date: str,
+    question_id: int,
+    username: str = Depends(verify_admin)
+):
+    """Получить конкретный вопрос розыгрыша"""
+    from raffle import get_question_by_id
+    question = get_question_by_id(question_id, raffle_date)
+    if not question:
+        raise HTTPException(status_code=404, detail="Вопрос не найден")
+    return question
+
+@router.put("/{raffle_date}/questions/{question_id}")
+async def update_raffle_question(
+    raffle_date: str,
+    question_id: int,
+    data: dict = Body(...),
+    username: str = Depends(verify_admin)
+):
+    """Обновить вопрос розыгрыша"""
+    from raffle import update_question
+    try:
+        question_text = data.get("question_text")
+        options = data.get("options")
+        correct_answer = data.get("correct_answer")
+        result = update_question(raffle_date, question_id, question_text, options, correct_answer)
+        if result:
+            return {"success": True, "message": "Вопрос обновлен"}
+        else:
+            raise HTTPException(status_code=404, detail="Вопрос не найден")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 

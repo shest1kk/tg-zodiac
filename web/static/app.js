@@ -83,12 +83,51 @@ async function loadPage(page) {
 
 // Дашборд
 async function loadDashboard() {
-    const [systemStats, dailyReport] = await Promise.all([
+    const [systemStats, dailyReport, newUsers] = await Promise.all([
         apiFetch('/stats/system'),
-        apiFetch('/stats/daily')
+        apiFetch('/stats/daily'),
+        apiFetch('/users/new?days=1&limit=20')
     ]);
     
     const content = document.getElementById('content');
+    
+    let newUsersHtml = '';
+    if (newUsers.users && newUsers.users.length > 0) {
+        newUsersHtml = `
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h5>🆕 Новые пользователи за сегодня (${newUsers.users.length})</h5>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                        <table class="table table-sm">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Username</th>
+                                    <th>Имя</th>
+                                    <th>Знак</th>
+                                    <th>Время регистрации</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${newUsers.users.map(user => `
+                                    <tr>
+                                        <td>${user.id}</td>
+                                        <td>${user.username || '-'}</td>
+                                        <td>${user.first_name || '-'}</td>
+                                        <td>${user.zodiac || '-'}</td>
+                                        <td>${user.created_at ? new Date(user.created_at).toLocaleString('ru-RU') : '-'}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    
     content.innerHTML = `
         <h2>📊 Дашборд</h2>
         
@@ -118,6 +157,7 @@ async function loadDashboard() {
                 </div>
             </div>
         </div>
+        ${newUsersHtml}
     `;
 }
 
@@ -125,17 +165,32 @@ async function loadDashboard() {
 
 // Квизы
 async function loadQuiz() {
-    const dates = await apiFetch('/quiz/dates');
+    const [dates, disabledDates] = await Promise.all([
+        apiFetch('/quiz/dates'),
+        apiFetch('/quiz/disabled-dates')
+    ]);
+    
+    const disabledSet = new Set(disabledDates.disabled_dates || []);
     
     const content = document.getElementById('content');
     content.innerHTML = `
         <h2>🎯 Квизы</h2>
         <div class="list-group">
-            ${dates.dates.map(date => `
-                <a href="#" class="list-group-item list-group-item-action" data-quiz-date="${date}">
-                    ${date}
-                </a>
-            `).join('')}
+            ${dates.dates.map(date => {
+                const isDisabled = disabledSet.has(date);
+                return `
+                    <div class="list-group-item d-flex justify-content-between align-items-center">
+                        <a href="#" class="flex-grow-1 text-decoration-none" data-quiz-date="${date}">
+                            ${date} ${isDisabled ? '<span class="badge bg-danger">Отключен</span>' : ''}
+                        </a>
+                        <div>
+                            <button class="btn btn-sm ${isDisabled ? 'btn-success' : 'btn-warning'}" onclick="toggleQuizDate('${date}')">
+                                ${isDisabled ? '✅ Включить' : '⏸️ Отключить'}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('')}
         </div>
     `;
     
@@ -144,22 +199,68 @@ async function loadQuiz() {
         item.addEventListener('click', async (e) => {
             e.preventDefault();
             const quizDate = item.dataset.quizDate;
-            const stats = await apiFetch(`/quiz/${quizDate}/stats`);
-            
-            content.innerHTML = `
-                <h2>🎯 Квиз ${quizDate}</h2>
-                <div class="card">
-                    <div class="card-body">
-                        <h5>Статистика</h5>
-                        <p>Всего участников: ${stats.total_participants}</p>
-                        <p>Получили билетик: ${stats.with_tickets}</p>
-                        <p>Не получили билетик: ${stats.no_tickets}</p>
-                        <p>Не приняли участие: ${stats.non_participants}</p>
-                    </div>
-                </div>
-            `;
+            await showQuizDetails(quizDate);
         });
     });
+}
+
+async function showQuizDetails(quizDate) {
+    const [stats, questions] = await Promise.all([
+        apiFetch(`/quiz/${quizDate}/stats`),
+        apiFetch(`/quiz/${quizDate}/questions`)
+    ]);
+    
+    const content = document.getElementById('content');
+    
+    const questionsHtml = questions.questions.map((q, idx) => `
+        <div class="card mb-2">
+            <div class="card-body">
+                <h6>Вопрос #${q.id || idx + 1}</h6>
+                <p><strong>${q.question || q.question_text || 'Нет текста'}</strong></p>
+                ${q.options ? `
+                    <ul>
+                        ${q.options.map((opt, i) => `
+                            <li>${i + 1}. ${opt} ${i === (q.correct_answer || q.correct) ? '✅' : ''}</li>
+                        `).join('')}
+                    </ul>
+                ` : ''}
+                <button class="btn btn-sm btn-primary" onclick="editQuizQuestion('${quizDate}', ${q.id || idx + 1})">✏️ Редактировать</button>
+            </div>
+        </div>
+    `).join('');
+    
+    content.innerHTML = `
+        <h2>🎯 Квиз ${quizDate}</h2>
+        <button class="btn btn-secondary mb-3" onclick="loadQuiz()">◀️ Назад к списку</button>
+        
+        <div class="card mb-3">
+            <div class="card-body">
+                <h5>Статистика</h5>
+                <p>Всего участников: ${stats.total_participants}</p>
+                <p>Получили билетик: ${stats.with_tickets}</p>
+                <p>Не получили билетик: ${stats.no_tickets}</p>
+                <p>Не приняли участие: ${stats.non_participants}</p>
+            </div>
+        </div>
+        
+        <h5>Вопросы</h5>
+        ${questionsHtml}
+    `;
+}
+
+async function toggleQuizDate(quizDate) {
+    try {
+        const result = await apiFetch(`/quiz/${quizDate}/toggle`, { method: 'POST' });
+        alert(result.message);
+        loadQuiz();
+    } catch (error) {
+        alert('Ошибка: ' + error.message);
+    }
+}
+
+async function editQuizQuestion(quizDate, questionId) {
+    // TODO: Реализовать модальное окно для редактирования
+    alert(`Редактирование вопроса ${questionId} квиза ${quizDate} (в разработке)`);
 }
 
 // Розыгрыши
@@ -183,58 +284,93 @@ async function loadRaffle() {
         item.addEventListener('click', async (e) => {
             e.preventDefault();
             const raffleDate = item.dataset.raffleDate;
-            const [stats, unchecked] = await Promise.all([
-                apiFetch(`/raffle/${raffleDate}/stats`),
-                apiFetch(`/raffle/${raffleDate}/unchecked`)
-            ]);
-            
-            let uncheckedHtml = '';
-            if (unchecked.unchecked.length > 0) {
-                uncheckedHtml = `
-                    <h5 class="mt-4">Непроверенные ответы (${unchecked.total})</h5>
-                    <div class="table-responsive">
-                        <table class="table table-sm">
-                            <thead>
-                                <tr>
-                                    <th>ID</th>
-                                    <th>Вопрос</th>
-                                    <th>Ответ</th>
-                                    <th>Действия</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${unchecked.unchecked.map(u => `
-                                    <tr>
-                                        <td>${u.user_id}</td>
-                                        <td>${u.question_text.substring(0, 50)}...</td>
-                                        <td>${u.answer}</td>
-                                        <td>
-                                            <button class="btn btn-sm btn-success" onclick="approveAnswer('${raffleDate}', ${u.user_id})">✅</button>
-                                            <button class="btn btn-sm btn-danger" onclick="denyAnswer('${raffleDate}', ${u.user_id})">❌</button>
-                                        </td>
-                                    </tr>
-                                `).join('')}
-                            </tbody>
-                        </table>
-                    </div>
-                `;
-            }
-            
-            content.innerHTML = `
-                <h2>🎁 Розыгрыш ${raffleDate}</h2>
-                <div class="card">
-                    <div class="card-body">
-                        <h5>Статистика</h5>
-                        <p>Всего участников: ${stats.total_participants}</p>
-                        <p>Принято: ${stats.approved}</p>
-                        <p>Отклонено: ${stats.denied}</p>
-                        <p>Не проверено: ${stats.unchecked}</p>
-                    </div>
-                </div>
-                ${uncheckedHtml}
-            `;
+            await showRaffleDetails(raffleDate);
         });
     });
+}
+
+async function showRaffleDetails(raffleDate) {
+    const [stats, unchecked, questions] = await Promise.all([
+        apiFetch(`/raffle/${raffleDate}/stats`),
+        apiFetch(`/raffle/${raffleDate}/unchecked`),
+        apiFetch(`/raffle/${raffleDate}/questions`)
+    ]);
+    
+    const content = document.getElementById('content');
+    
+    let uncheckedHtml = '';
+    if (unchecked.unchecked.length > 0) {
+        uncheckedHtml = `
+            <h5 class="mt-4">Непроверенные ответы (${unchecked.total})</h5>
+            <div class="table-responsive">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Вопрос</th>
+                            <th>Ответ</th>
+                            <th>Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${unchecked.unchecked.map(u => `
+                            <tr>
+                                <td>${u.user_id}</td>
+                                <td>${u.question_text ? u.question_text.substring(0, 50) + '...' : '-'}</td>
+                                <td>${u.answer}</td>
+                                <td>
+                                    <button class="btn btn-sm btn-success" onclick="approveAnswer('${raffleDate}', ${u.user_id})">✅</button>
+                                    <button class="btn btn-sm btn-danger" onclick="denyAnswer('${raffleDate}', ${u.user_id})">❌</button>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+    
+    const questionsHtml = questions.questions ? questions.questions.map((q, idx) => `
+        <div class="card mb-2">
+            <div class="card-body">
+                <h6>Вопрос #${q.id || idx + 1}</h6>
+                <p><strong>${q.question || q.question_text || 'Нет текста'}</strong></p>
+                ${q.options ? `
+                    <ul>
+                        ${q.options.map((opt, i) => `
+                            <li>${i + 1}. ${opt} ${i === (q.correct_answer || q.correct) ? '✅' : ''}</li>
+                        `).join('')}
+                    </ul>
+                ` : ''}
+                <button class="btn btn-sm btn-primary" onclick="editRaffleQuestion('${raffleDate}', ${q.id || idx + 1})">✏️ Редактировать</button>
+            </div>
+        </div>
+    `).join('') : '<p>Вопросы не найдены</p>';
+    
+    content.innerHTML = `
+        <h2>🎁 Розыгрыш ${raffleDate}</h2>
+        <button class="btn btn-secondary mb-3" onclick="loadRaffle()">◀️ Назад к списку</button>
+        
+        <div class="card mb-3">
+            <div class="card-body">
+                <h5>Статистика</h5>
+                <p>Всего участников: ${stats.total_participants}</p>
+                <p>Принято: ${stats.approved}</p>
+                <p>Отклонено: ${stats.denied}</p>
+                <p>Не проверено: ${stats.unchecked}</p>
+            </div>
+        </div>
+        
+        <h5>Вопросы</h5>
+        ${questionsHtml}
+        
+        ${uncheckedHtml}
+    `;
+}
+
+async function editRaffleQuestion(raffleDate, questionId) {
+    // TODO: Реализовать модальное окно для редактирования
+    alert(`Редактирование вопроса ${questionId} розыгрыша ${raffleDate} (в разработке)`);
 }
 
 
@@ -444,13 +580,48 @@ async function removeTicket(userId, ticketNumber) {
 }
 
 // Улучшенная страница пользователей
-async function loadUsers() {
-    const users = await apiFetch('/users/?limit=50');
+let currentUserPage = 0;
+let currentUserLimit = 100;
+let showingRegistered = false;
+
+async function loadUsers(page = 0) {
+    currentUserPage = page;
+    const skip = page * currentUserLimit;
+    
+    const endpoint = showingRegistered ? `/users/registered?skip=${skip}&limit=${currentUserLimit}` : `/users/?skip=${skip}&limit=${currentUserLimit}`;
+    const users = await apiFetch(endpoint);
     
     const content = document.getElementById('content');
+    
+    const totalPages = Math.ceil(users.total / currentUserLimit);
+    const paginationHtml = totalPages > 1 ? `
+        <nav aria-label="Пагинация">
+            <ul class="pagination justify-content-center">
+                <li class="page-item ${page === 0 ? 'disabled' : ''}">
+                    <a class="page-link" href="#" onclick="loadUsers(${page - 1}); return false;">Предыдущая</a>
+                </li>
+                <li class="page-item active">
+                    <span class="page-link">Страница ${page + 1} из ${totalPages}</span>
+                </li>
+                <li class="page-item ${page >= totalPages - 1 ? 'disabled' : ''}">
+                    <a class="page-link" href="#" onclick="loadUsers(${page + 1}); return false;">Следующая</a>
+                </li>
+            </ul>
+        </nav>
+    ` : '';
+    
     content.innerHTML = `
         <h2>👥 Пользователи</h2>
-        <p>Всего: ${users.total}</p>
+        <p>Всего: ${users.total} ${showingRegistered ? '(только авторизованные)' : ''}</p>
+        
+        <div class="btn-group mb-3" role="group">
+            <button type="button" class="btn ${!showingRegistered ? 'btn-primary' : 'btn-outline-primary'}" onclick="showingRegistered=false; loadUsers(0);">
+                Все пользователи
+            </button>
+            <button type="button" class="btn ${showingRegistered ? 'btn-primary' : 'btn-outline-primary'}" onclick="showingRegistered=true; loadUsers(0);">
+                Авторизованные пользователи
+            </button>
+        </div>
         
         <div class="card mt-3">
             <div class="card-body">
@@ -492,6 +663,7 @@ async function loadUsers() {
                 </tbody>
             </table>
         </div>
+        ${paginationHtml}
     `;
 }
 
