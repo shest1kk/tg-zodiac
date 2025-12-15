@@ -13,8 +13,10 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    # Пробрасываем порт только на localhost для nginx reverse proxy
+    # Если используете nginx на хосте, порт будет доступен только локально
     ports:
-      - "8000:8000"  # Веб-интерфейс админ-панели
+      - "127.0.0.1:8000:8000"  # Веб-интерфейс админ-панели (только localhost)
     volumes:
       - ./data:/app/data  # Монтирование папки с данными (для редактирования predictions.json через админ-панель)
     logging:
