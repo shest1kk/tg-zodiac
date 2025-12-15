@@ -936,9 +936,10 @@ async def get_next_raffle_ticket_number() -> int:
     Ищет максимальный номер из QuizResult и RaffleParticipant
     
     Использует блокировку для предотвращения race condition при одновременных запросах
+    Проверяет на дубли и уведомляет админов при обнаружении
     """
     # Импортируем блокировку из quiz.py для синхронизации между квизами и розыгрышами
-    from quiz import _ticket_number_lock
+    from quiz import _ticket_number_lock, _notify_admins_about_duplicate_ticket
     
     async with _ticket_number_lock:  # Блокируем доступ для предотвращения дублей
         try:
@@ -969,9 +970,29 @@ async def get_next_raffle_ticket_number() -> int:
                 
                 # Если нет билетов, начинаем с 424 (423+1, как указал пользователь)
                 if max_ticket is None:
-                    return 424
+                    next_ticket = 424
+                else:
+                    next_ticket = max_ticket + 1
                 
-                return max_ticket + 1
+                # Проверяем на дубли (на всякий случай, хотя блокировка должна предотвратить)
+                duplicate_check_quiz = await session.execute(
+                    select(QuizResult).where(QuizResult.ticket_number == next_ticket)
+                )
+                duplicate_quiz = duplicate_check_quiz.scalars().first()
+                
+                duplicate_check_raffle = await session.execute(
+                    select(RaffleParticipant).where(RaffleParticipant.ticket_number == next_ticket)
+                )
+                duplicate_raffle = duplicate_check_raffle.scalars().first()
+                
+                if duplicate_quiz or duplicate_raffle:
+                    # Обнаружен дубль! Уведомляем админов
+                    await _notify_admins_about_duplicate_ticket(next_ticket, duplicate_quiz, duplicate_raffle)
+                    # Выдаем следующий номер
+                    next_ticket += 1
+                    logger.error(f"⚠️ Обнаружен дубль билетика №{next_ticket - 1}! Выдан следующий номер: {next_ticket}")
+                
+                return next_ticket
                 
         except Exception as e:
             logger.error(f"Ошибка при получении следующего номера билетика для розыгрыша: {e}")

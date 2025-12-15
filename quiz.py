@@ -435,6 +435,7 @@ async def get_next_ticket_number() -> int:
     Ищет максимальный номер из QuizResult и RaffleParticipant
     
     Использует блокировку для предотвращения race condition при одновременных запросах
+    Проверяет на дубли и уведомляет админов при обнаружении
     """
     async with _ticket_number_lock:  # Блокируем доступ для предотвращения дублей
         try:
@@ -466,13 +467,74 @@ async def get_next_ticket_number() -> int:
                 
                 # Если нет билетов, начинаем с 101
                 if max_ticket is None:
-                    return TICKET_START_NUMBER + 1  # Первый билетик = 101
+                    next_ticket = TICKET_START_NUMBER + 1  # Первый билетик = 101
+                else:
+                    next_ticket = max_ticket + 1
                 
-                return max_ticket + 1
+                # Проверяем на дубли (на всякий случай, хотя блокировка должна предотвратить)
+                duplicate_check_quiz = await session.execute(
+                    select(QuizResult).where(QuizResult.ticket_number == next_ticket)
+                )
+                duplicate_quiz = duplicate_check_quiz.scalars().first()
+                
+                duplicate_check_raffle = await session.execute(
+                    select(RaffleParticipant).where(RaffleParticipant.ticket_number == next_ticket)
+                )
+                duplicate_raffle = duplicate_check_raffle.scalars().first()
+                
+                if duplicate_quiz or duplicate_raffle:
+                    # Обнаружен дубль! Уведомляем админов
+                    await _notify_admins_about_duplicate_ticket(next_ticket, duplicate_quiz, duplicate_raffle)
+                    # Выдаем следующий номер
+                    next_ticket += 1
+                    logger.error(f"⚠️ Обнаружен дубль билетика №{next_ticket - 1}! Выдан следующий номер: {next_ticket}")
+                
+                return next_ticket
                 
         except Exception as e:
             logger.error(f"Ошибка при получении следующего номера билетика: {e}")
             return TICKET_START_NUMBER + 1
+
+
+async def _notify_admins_about_duplicate_ticket(ticket_number: int, duplicate_quiz, duplicate_raffle):
+    """Уведомляет админов о обнаруженном дубле билетика"""
+    try:
+        from config import ADMIN_IDS, TG_TOKEN
+        if not ADMIN_IDS:
+            return
+        
+        from aiogram import Bot
+        from aiogram.types import FSInputFile
+        from pathlib import Path
+        
+        bot = Bot(TG_TOKEN)
+        
+        # Формируем информацию о дублях
+        duplicate_info = []
+        if duplicate_quiz:
+            duplicate_info.append(f"Квиз: ID {duplicate_quiz.user_id}, дата {duplicate_quiz.quiz_date}")
+        if duplicate_raffle:
+            duplicate_info.append(f"Розыгрыш: ID {duplicate_raffle.user_id}, дата {duplicate_raffle.raffle_date}")
+        
+        admin_text = (
+            f"⚠️ <b>ОБНАРУЖЕН ДУБЛЬ БИЛЕТИКА!</b>\n\n"
+            f"🎟 Билетик №{ticket_number} уже существует:\n"
+            f"{chr(10).join(duplicate_info)}\n\n"
+            f"Система автоматически выдаст следующий номер.\n"
+            f"Проверьте вручную с помощью команды:\n"
+            f"<code>/check_ticket_time {ticket_number}</code>"
+        )
+        
+        for admin_id in ADMIN_IDS:
+            try:
+                await safe_send_message(bot, admin_id, admin_text, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке уведомления админу {admin_id} о дубле билетика: {e}")
+        
+        await bot.session.close()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при уведомлении админов о дубле билетика: {e}", exc_info=True)
 
 
 async def check_quiz_timeout(bot, user_id: int, quiz_date: str):
