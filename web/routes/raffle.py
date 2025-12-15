@@ -4,19 +4,19 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy import select, func, and_
 from database import AsyncSessionLocal, Raffle, RaffleParticipant
-from web.auth import verify_admin
+from web.auth import get_current_user
 
 router = APIRouter()
 
 @router.get("/dates")
-async def get_raffle_dates(username: str = Depends(verify_admin)):
+async def get_raffle_dates(username: str = Depends(get_current_user)):
     """Получить список дат розыгрышей"""
     from raffle import get_all_raffle_dates
     dates = get_all_raffle_dates()
     return {"dates": dates}
 
 @router.get("/{raffle_date}/stats")
-async def get_raffle_stats(raffle_date: str, username: str = Depends(verify_admin)):
+async def get_raffle_stats(raffle_date: str, username: str = Depends(get_current_user)):
     """Получить статистику по розыгрышу"""
     async with AsyncSessionLocal() as session:
         # Все участники
@@ -70,7 +70,7 @@ async def get_unchecked_answers(
     raffle_date: str,
     skip: int = 0,
     limit: int = 50,
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Получить список непроверенных ответов"""
     from raffle import get_unchecked_answers as get_unchecked
@@ -98,7 +98,7 @@ async def get_unchecked_answers(
 async def approve_answer(
     raffle_date: str,
     user_id: int,
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Одобрить ответ пользователя"""
     from raffle import approve_answer as approve
@@ -113,7 +113,7 @@ async def approve_answer(
 async def deny_answer(
     raffle_date: str,
     user_id: int,
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Отклонить ответ пользователя"""
     from raffle import deny_answer as deny
@@ -125,7 +125,7 @@ async def deny_answer(
     return {"success": True, "message": f"Ответ пользователя {user_id} отклонен"}
 
 @router.get("/{raffle_date}/questions")
-async def get_raffle_questions(raffle_date: str, username: str = Depends(verify_admin)):
+async def get_raffle_questions(raffle_date: str, username: str = Depends(get_current_user)):
     """Получить вопросы розыгрыша"""
     from raffle import get_all_questions
     questions = get_all_questions(raffle_date)
@@ -135,7 +135,7 @@ async def get_raffle_questions(raffle_date: str, username: str = Depends(verify_
 async def get_raffle_question(
     raffle_date: str,
     question_id: int,
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Получить конкретный вопрос розыгрыша"""
     from raffle import get_question_by_id
@@ -149,7 +149,7 @@ async def update_raffle_question(
     raffle_date: str,
     question_id: int,
     data: dict = Body(...),
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Обновить вопрос розыгрыша"""
     from raffle import update_question

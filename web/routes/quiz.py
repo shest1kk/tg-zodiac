@@ -4,19 +4,19 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy import select, func, and_
 from database import AsyncSessionLocal, Quiz, QuizResult, QuizParticipant
-from web.auth import verify_admin
+from web.auth import get_current_user
 
 router = APIRouter()
 
 @router.get("/dates")
-async def get_quiz_dates(username: str = Depends(verify_admin)):
+async def get_quiz_dates(username: str = Depends(get_current_user)):
     """Получить список дат квизов"""
     from quiz import get_all_quiz_dates
     dates = get_all_quiz_dates()
     return {"dates": dates}
 
 @router.get("/{quiz_date}/stats")
-async def get_quiz_stats(quiz_date: str, username: str = Depends(verify_admin)):
+async def get_quiz_stats(quiz_date: str, username: str = Depends(get_current_user)):
     """Получить статистику по квизу"""
     async with AsyncSessionLocal() as session:
         # Все участники
@@ -71,7 +71,7 @@ async def get_quiz_participants(
     quiz_date: str,
     skip: int = 0,
     limit: int = 50,
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Получить список участников квиза"""
     async with AsyncSessionLocal() as session:
@@ -96,7 +96,7 @@ async def get_quiz_participants(
         return {"participants": result}
 
 @router.get("/{quiz_date}/questions")
-async def get_quiz_questions(quiz_date: str, username: str = Depends(verify_admin)):
+async def get_quiz_questions(quiz_date: str, username: str = Depends(get_current_user)):
     """Получить вопросы квиза"""
     from quiz import get_all_questions
     questions = get_all_questions(quiz_date)
@@ -107,7 +107,7 @@ async def update_quiz_question(
     quiz_date: str,
     question_id: int,
     data: dict = Body(...),
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Обновить вопрос квиза"""
     from quiz import update_quiz_question as update_question
@@ -125,7 +125,7 @@ async def update_quiz_question(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/disabled-dates")
-async def get_disabled_dates(username: str = Depends(verify_admin)):
+async def get_disabled_dates(username: str = Depends(get_current_user)):
     """Получить список отключенных дат квизов"""
     from pathlib import Path
     import json
@@ -142,7 +142,7 @@ async def get_disabled_dates(username: str = Depends(verify_admin)):
     return {"disabled_dates": []}
 
 @router.post("/{quiz_date}/toggle")
-async def toggle_quiz_date(quiz_date: str, username: str = Depends(verify_admin)):
+async def toggle_quiz_date(quiz_date: str, username: str = Depends(get_current_user)):
     """Включить/отключить квиз для даты"""
     from pathlib import Path
     import json

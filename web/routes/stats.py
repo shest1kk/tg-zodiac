@@ -5,12 +5,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select, func, and_
 from datetime import datetime, timedelta
 from database import AsyncSessionLocal, User, QuizResult, RaffleParticipant
-from web.auth import verify_admin
+from web.auth import get_current_user
 
 router = APIRouter()
 
 @router.get("/system")
-async def get_system_stats(username: str = Depends(verify_admin)):
+async def get_system_stats(username: str = Depends(get_current_user)):
     """Получить статистику системы"""
     async with AsyncSessionLocal() as session:
         # Пользователи
@@ -53,7 +53,7 @@ async def get_system_stats(username: str = Depends(verify_admin)):
         }
 
 @router.get("/daily")
-async def get_daily_report(username: str = Depends(verify_admin)):
+async def get_daily_report(username: str = Depends(get_current_user)):
     """Ежедневный отчет"""
     async with AsyncSessionLocal() as session:
         today = datetime.now().date()
@@ -112,7 +112,7 @@ async def get_daily_report(username: str = Depends(verify_admin)):
         }
 
 @router.get("/weekly")
-async def get_weekly_report(username: str = Depends(verify_admin)):
+async def get_weekly_report(username: str = Depends(get_current_user)):
     """Еженедельный отчет"""
     async with AsyncSessionLocal() as session:
         today = datetime.now().date()
@@ -179,7 +179,7 @@ async def get_weekly_report(username: str = Depends(verify_admin)):
         }
 
 @router.get("/health")
-async def get_system_health(username: str = Depends(verify_admin)):
+async def get_system_health(username: str = Depends(get_current_user)):
     """Проверка состояния системы"""
     from scheduler import scheduler
     try:
@@ -250,7 +250,7 @@ async def get_system_health(username: str = Depends(verify_admin)):
 @router.get("/errors")
 async def get_recent_errors(
     limit: int = 10,
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Получить последние ошибки"""
     try:

@@ -11,14 +11,15 @@ import os
 WEB_ADMIN_LOGIN = os.getenv("WEB_ADMIN_LOGIN", "admin")
 WEB_ADMIN_PASSWORD = os.getenv("WEB_ADMIN_PASSWORD", "admin")
 
-def verify_admin(request: Request) -> str:
-    """Проверяет авторизацию и возвращает username"""
+def get_current_user(request: Request) -> str:
+    """Получает текущего пользователя из сессии"""
     if not request.session.get("authenticated"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Требуется авторизация"
         )
     return request.session.get("username")
+
 
 def verify_login(login: str, password: str) -> bool:
     """Проверяет логин и пароль"""

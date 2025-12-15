@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import secrets
 
-from web.auth import verify_admin, verify_login
+from web.auth import get_current_user, verify_login
 from web.routes import tickets, users, quiz, raffle, stats
 
 # Глобальные переменные для доступа к боту и dispatcher
@@ -92,7 +92,7 @@ async def logout(request: Request):
     return RedirectResponse(url="/login", status_code=303)
 
 @app.get("/", response_class=HTMLResponse)
-async def root(request: Request, username: str = Depends(verify_admin)):
+async def root(request: Request, username: str = Depends(get_current_user)):
     """Главная страница админ-панели"""
     return templates.TemplateResponse("index.html", {"request": request, "username": username})
 

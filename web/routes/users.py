@@ -4,7 +4,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select, func
 from database import AsyncSessionLocal, User
-from web.auth import verify_admin
+from web.auth import get_current_user
 
 router = APIRouter()
 
@@ -12,7 +12,7 @@ router = APIRouter()
 async def get_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Получить список пользователей"""
     async with AsyncSessionLocal() as session:
@@ -43,7 +43,7 @@ async def get_users(
         }
 
 @router.get("/{user_id}")
-async def get_user(user_id: int, username: str = Depends(verify_admin)):
+async def get_user(user_id: int, username: str = Depends(get_current_user)):
     """Получить информацию о пользователе"""
     async with AsyncSessionLocal() as session:
         user = await session.get(User, user_id)
@@ -62,7 +62,7 @@ async def get_user(user_id: int, username: str = Depends(verify_admin)):
         }
 
 @router.get("/stats/overview")
-async def get_users_stats(username: str = Depends(verify_admin)):
+async def get_users_stats(username: str = Depends(get_current_user)):
     """Получить общую статистику по пользователям"""
     async with AsyncSessionLocal() as session:
         total = await session.scalar(select(func.count(User.id)))
@@ -85,7 +85,7 @@ async def get_users_stats(username: str = Depends(verify_admin)):
 async def get_new_users(
     days: int = Query(1, ge=1, le=30),
     limit: int = Query(100, ge=1, le=500),
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Получить список новых пользователей"""
     from datetime import datetime, timedelta
@@ -117,7 +117,7 @@ async def get_new_users(
 async def get_registered_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    username: str = Depends(verify_admin)
+    username: str = Depends(get_current_user)
 ):
     """Получить список авторизованных пользователей"""
     async with AsyncSessionLocal() as session:
