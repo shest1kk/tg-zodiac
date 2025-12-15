@@ -269,3 +269,104 @@ async def get_user_tickets(user_id: int, admin_id: int = Depends(verify_admin)):
         
         return {"user_id": user_id, "tickets": tickets}
 
+@router.get("/check_time/{ticket_number}")
+async def check_ticket_time(ticket_number: int, admin_id: int = Depends(verify_admin)):
+    """Проверить время выдачи билетика"""
+    from datetime import datetime, timezone, timedelta
+    
+    async with AsyncSessionLocal() as session:
+        # Ищем билетики в квизах
+        quiz_result = await session.execute(
+            select(QuizResult).where(
+                QuizResult.ticket_number == ticket_number
+            ).order_by(QuizResult.completed_at.asc())
+        )
+        quiz_tickets = quiz_result.scalars().all()
+        
+        # Ищем билетики в розыгрышах
+        raffle_result = await session.execute(
+            select(RaffleParticipant).where(
+                RaffleParticipant.ticket_number == ticket_number
+            ).order_by(RaffleParticipant.timestamp.asc())
+        )
+        raffle_tickets = raffle_result.scalars().all()
+        
+        if not quiz_tickets and not raffle_tickets:
+            raise HTTPException(status_code=404, detail=f"Билетик №{ticket_number} не найден")
+        
+        moscow_tz = timezone(timedelta(hours=3))
+        all_tickets = []
+        
+        # Обрабатываем квизы
+        for ticket in quiz_tickets:
+            try:
+                date_obj = datetime.strptime(ticket.quiz_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = ticket.quiz_date
+            
+            if ticket.completed_at:
+                if ticket.completed_at.tzinfo is None:
+                    utc_time = ticket.completed_at.replace(tzinfo=timezone.utc)
+                    moscow_time = utc_time.astimezone(moscow_tz)
+                else:
+                    moscow_time = ticket.completed_at.astimezone(moscow_tz)
+                time_display = moscow_time.strftime("%d.%m.%Y %H:%M:%S МСК")
+            else:
+                time_display = "неизвестно"
+            
+            all_tickets.append({
+                'user_id': ticket.user_id,
+                'source': 'квиз',
+                'date': date_display,
+                'time': ticket.completed_at.isoformat() if ticket.completed_at else None,
+                'time_display': time_display,
+                'db_id': ticket.id
+            })
+        
+        # Обрабатываем розыгрыши
+        for ticket in raffle_tickets:
+            try:
+                date_obj = datetime.strptime(ticket.raffle_date, "%Y-%m-%d")
+                date_display = date_obj.strftime("%d.%m.%Y")
+            except:
+                date_display = ticket.raffle_date
+            
+            if ticket.timestamp:
+                if ticket.timestamp.tzinfo is None:
+                    utc_time = ticket.timestamp.replace(tzinfo=timezone.utc)
+                    moscow_time = utc_time.astimezone(moscow_tz)
+                else:
+                    moscow_time = ticket.timestamp.astimezone(moscow_tz)
+                time_display = moscow_time.strftime("%d.%m.%Y %H:%M:%S МСК") + " (время вопроса, билетик выдан позже)"
+            else:
+                time_display = "неизвестно"
+            
+            all_tickets.append({
+                'user_id': ticket.user_id,
+                'source': 'розыгрыш',
+                'date': date_display,
+                'time': ticket.timestamp.isoformat() if ticket.timestamp else None,
+                'time_display': time_display,
+                'db_id': ticket.id
+            })
+        
+        # Сортируем по времени
+        all_tickets.sort(key=lambda x: (
+            x['time'] if x['time'] else datetime.min.isoformat(),
+            x.get('db_id', 0)
+        ))
+        
+        same_time = len(all_tickets) > 1 and all_tickets[0]['time'] == all_tickets[1]['time']
+        first_user = all_tickets[0] if all_tickets else None
+        
+        return {
+            "ticket_number": ticket_number,
+            "tickets": all_tickets,
+            "first_user": {
+                "user_id": first_user['user_id'],
+                "source": first_user['source']
+            } if first_user else None,
+            "same_time": same_time
+        }
+

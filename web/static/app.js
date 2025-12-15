@@ -121,97 +121,7 @@ async function loadDashboard() {
     `;
 }
 
-// Билетики
-async function loadTickets() {
-    const [stats, duplicates] = await Promise.all([
-        apiFetch('/tickets/stats'),
-        apiFetch('/tickets/duplicates')
-    ]);
-    
-    const content = document.getElementById('content');
-    let duplicatesHtml = '';
-    
-    if (duplicates.duplicates.length > 0) {
-        duplicatesHtml = `
-            <div class="alert alert-warning">
-                <h5>⚠️ Обнаружено дублей: ${duplicates.duplicates.length}</h5>
-                <ul>
-                    ${duplicates.duplicates.map(dup => 
-                        `<li>Билет №${dup.ticket_number} - пользователи: ${dup.user_ids.join(', ')} (${dup.source})</li>`
-                    ).join('')}
-                </ul>
-            </div>
-        `;
-    }
-    
-    content.innerHTML = `
-        <h2>🎟 Билетики</h2>
-        
-        <div class="row mt-4">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-body">
-                        <h5>Общая статистика</h5>
-                        <p>Всего: <strong>${stats.total}</strong></p>
-                        <p>Из квизов: ${stats.from_quiz}</p>
-                        <p>Из розыгрышей: ${stats.from_raffle}</p>
-                        <p>Диапазон: №${stats.min} - №${stats.max}</p>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-body">
-                        <h5>Дубли</h5>
-                        <p>В квизах: ${stats.duplicates.in_quiz}</p>
-                        <p>В розыгрышах: ${stats.duplicates.in_raffle}</p>
-                        <p>Между таблицами: ${stats.duplicates.cross_table}</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        ${duplicatesHtml}
-    `;
-}
 
-// Пользователи
-async function loadUsers() {
-    const users = await apiFetch('/users/?limit=50');
-    
-    const content = document.getElementById('content');
-    content.innerHTML = `
-        <h2>👥 Пользователи</h2>
-        <p>Всего: ${users.total}</p>
-        
-        <div class="table-responsive">
-            <table class="table table-striped">
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Username</th>
-                        <th>Имя</th>
-                        <th>Знак</th>
-                        <th>Подписан</th>
-                        <th>Зарегистрирован</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${users.users.map(user => `
-                        <tr>
-                            <td>${user.id}</td>
-                            <td>${user.username || '-'}</td>
-                            <td>${user.first_name || '-'}</td>
-                            <td>${user.zodiac || '-'}</td>
-                            <td>${user.subscribed ? '✅' : '❌'}</td>
-                            <td>${user.registration_completed ? '✅' : '❌'}</td>
-                        </tr>
-                    `).join('')}
-                </tbody>
-            </table>
-        </div>
-    `;
-}
 
 // Квизы
 async function loadQuiz() {
@@ -327,14 +237,384 @@ async function loadRaffle() {
     });
 }
 
-// Статистика
-async function loadStats() {
-    const [daily, weekly] = await Promise.all([
-        apiFetch('/stats/daily'),
-        apiFetch('/stats/weekly')
+
+// Функции для действий
+async function approveAnswer(raffleDate, userId) {
+    try {
+        await apiFetch(`/raffle/${raffleDate}/approve/${userId}`, { method: 'POST' });
+        alert('Ответ одобрен!');
+        loadPage('raffle');
+    } catch (error) {
+        alert('Ошибка: ' + error.message);
+    }
+}
+
+async function denyAnswer(raffleDate, userId) {
+    try {
+        await apiFetch(`/raffle/${raffleDate}/deny/${userId}`, { method: 'POST' });
+        alert('Ответ отклонен!');
+        loadPage('raffle');
+    } catch (error) {
+        alert('Ошибка: ' + error.message);
+    }
+}
+
+// Улучшенная страница билетиков
+async function loadTickets() {
+    const [stats, duplicates] = await Promise.all([
+        apiFetch('/tickets/stats'),
+        apiFetch('/tickets/duplicates')
     ]);
     
     const content = document.getElementById('content');
+    
+    let duplicatesHtml = '';
+    if (duplicates.duplicates.length > 0) {
+        duplicatesHtml = `
+            <div class="alert alert-warning mt-3">
+                <h5>⚠️ Обнаружено дублей: ${duplicates.duplicates.length}</h5>
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Билет №</th>
+                                <th>Пользователи</th>
+                                <th>Источник</th>
+                                <th>Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${duplicates.duplicates.map(dup => `
+                                <tr>
+                                    <td>${dup.ticket_number}</td>
+                                    <td>${dup.user_ids.join(', ')}</td>
+                                    <td>${dup.source}</td>
+                                    <td>
+                                        <button class="btn btn-sm btn-info" onclick="checkTicketTime(${dup.ticket_number})">⏰ Время</button>
+                                        ${dup.user_ids.map(uid => `
+                                            <button class="btn btn-sm btn-danger" onclick="removeTicket(${uid}, ${dup.ticket_number})">🗑️ Удалить</button>
+                                        `).join('')}
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+    }
+    
+    content.innerHTML = `
+        <h2>🎟 Билетики</h2>
+        
+        <div class="row mt-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h5>Общая статистика</h5>
+                        <p>Всего: <strong>${stats.total}</strong></p>
+                        <p>Из квизов: ${stats.from_quiz}</p>
+                        <p>Из розыгрышей: ${stats.from_raffle}</p>
+                        <p>Диапазон: №${stats.min || 'N/A'} - №${stats.max || 'N/A'}</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h5>Дубли</h5>
+                        <p>В квизах: ${stats.duplicates.in_quiz}</p>
+                        <p>В розыгрышах: ${stats.duplicates.in_raffle}</p>
+                        <p>Между таблицами: ${stats.duplicates.cross_table}</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card mt-3">
+            <div class="card-body">
+                <h5>🔍 Поиск билетика</h5>
+                <div class="input-group">
+                    <input type="number" id="ticketSearch" class="form-control" placeholder="Номер билетика">
+                    <button class="btn btn-primary" onclick="searchTicket()">Найти</button>
+                </div>
+            </div>
+        </div>
+        
+        ${duplicatesHtml}
+    `;
+}
+
+// Поиск билетика
+async function searchTicket() {
+    const ticketNumber = document.getElementById('ticketSearch').value;
+    if (!ticketNumber) {
+        alert('Введите номер билетика');
+        return;
+    }
+    
+    try {
+        const data = await apiFetch(`/tickets/check_time/${ticketNumber}`);
+        showTicketInfo(data);
+    } catch (error) {
+        alert('Ошибка: ' + error.message);
+    }
+}
+
+// Показать информацию о билетике
+function showTicketInfo(data) {
+    const content = document.getElementById('content');
+    const ticketsHtml = data.tickets.map((t, i) => `
+        <tr>
+            <td>${i + 1}</td>
+            <td>${t.user_id}</td>
+            <td>${t.source}</td>
+            <td>${t.date}</td>
+            <td>${t.time_display}</td>
+            <td>${t.db_id}</td>
+            <td>
+                <button class="btn btn-sm btn-danger" onclick="removeTicket(${t.user_id}, ${data.ticket_number})">🗑️ Удалить</button>
+            </td>
+        </tr>
+    `).join('');
+    
+    const modal = `
+        <div class="modal fade" id="ticketModal" tabindex="-1">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">🎟 Билетик №${data.ticket_number}</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>ID пользователя</th>
+                                    <th>Источник</th>
+                                    <th>Дата</th>
+                                    <th>Время</th>
+                                    <th>ID БД</th>
+                                    <th>Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody>${ticketsHtml}</tbody>
+                        </table>
+                        ${data.first_user ? `<p><strong>🏆 Первым получил:</strong> ID ${data.first_user.user_id} (${data.first_user.source})</p>` : ''}
+                        ${data.same_time ? '<p class="text-warning">⚠️ Внимание: Оба пользователя получили билетик в одно и то же время!</p>' : ''}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    document.body.insertAdjacentHTML('beforeend', modal);
+    const bsModal = new bootstrap.Modal(document.getElementById('ticketModal'));
+    bsModal.show();
+    
+    document.getElementById('ticketModal').addEventListener('hidden.bs.modal', function() {
+        this.remove();
+    });
+}
+
+// Проверить время билетика
+async function checkTicketTime(ticketNumber) {
+    try {
+        const data = await apiFetch(`/tickets/check_time/${ticketNumber}`);
+        showTicketInfo(data);
+    } catch (error) {
+        alert('Ошибка: ' + error.message);
+    }
+}
+
+// Удалить билетик
+async function removeTicket(userId, ticketNumber) {
+    if (!confirm(`Удалить билетик №${ticketNumber} у пользователя ${userId}?`)) {
+        return;
+    }
+    
+    try {
+        await apiFetch(`/tickets/${userId}/${ticketNumber}`, { method: 'DELETE' });
+        alert('Билетик удален!');
+        loadPage('tickets');
+    } catch (error) {
+        alert('Ошибка: ' + error.message);
+    }
+}
+
+// Улучшенная страница пользователей
+async function loadUsers() {
+    const users = await apiFetch('/users/?limit=50');
+    
+    const content = document.getElementById('content');
+    content.innerHTML = `
+        <h2>👥 Пользователи</h2>
+        <p>Всего: ${users.total}</p>
+        
+        <div class="card mt-3">
+            <div class="card-body">
+                <h5>🔍 Поиск пользователя</h5>
+                <div class="input-group">
+                    <input type="number" id="userSearch" class="form-control" placeholder="ID пользователя">
+                    <button class="btn btn-primary" onclick="searchUser()">Найти</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="table-responsive mt-3">
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Username</th>
+                        <th>Имя</th>
+                        <th>Знак</th>
+                        <th>Подписан</th>
+                        <th>Зарегистрирован</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${users.users.map(user => `
+                        <tr>
+                            <td>${user.id}</td>
+                            <td>${user.username || '-'}</td>
+                            <td>${user.first_name || '-'}</td>
+                            <td>${user.zodiac || '-'}</td>
+                            <td>${user.subscribed ? '✅' : '❌'}</td>
+                            <td>${user.registration_completed ? '✅' : '❌'}</td>
+                            <td>
+                                <button class="btn btn-sm btn-info" onclick="viewUserTickets(${user.id})">🎟 Билетики</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+// Поиск пользователя
+async function searchUser() {
+    const userId = document.getElementById('userSearch').value;
+    if (!userId) {
+        alert('Введите ID пользователя');
+        return;
+    }
+    
+    try {
+        const user = await apiFetch(`/users/${userId}`);
+        viewUserDetails(user);
+    } catch (error) {
+        alert('Ошибка: ' + error.message);
+    }
+}
+
+// Показать детали пользователя
+function viewUserDetails(user) {
+    const modal = `
+        <div class="modal fade" id="userModal" tabindex="-1">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">👤 Пользователь ${user.id}</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p><strong>Username:</strong> ${user.username || '-'}</p>
+                        <p><strong>Имя:</strong> ${user.first_name || '-'}</p>
+                        <p><strong>Знак зодиака:</strong> ${user.zodiac || '-'}</p>
+                        <p><strong>Подписан:</strong> ${user.subscribed ? '✅' : '❌'}</p>
+                        <p><strong>Зарегистрирован:</strong> ${user.registration_completed ? '✅' : '❌'}</p>
+                        <p><strong>Создан:</strong> ${user.created_at ? new Date(user.created_at).toLocaleString('ru-RU') : '-'}</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    document.body.insertAdjacentHTML('beforeend', modal);
+    const bsModal = new bootstrap.Modal(document.getElementById('userModal'));
+    bsModal.show();
+    
+    document.getElementById('userModal').addEventListener('hidden.bs.modal', function() {
+        this.remove();
+    });
+}
+
+// Показать билетики пользователя
+async function viewUserTickets(userId) {
+    try {
+        const data = await apiFetch(`/tickets/user/${userId}`);
+        const ticketsHtml = data.tickets.map(t => `
+            <tr>
+                <td>${t.ticket_number}</td>
+                <td>${t.source}</td>
+                <td>${t.date}</td>
+                <td>${t.completed_at || t.timestamp ? new Date(t.completed_at || t.timestamp).toLocaleString('ru-RU') : '-'}</td>
+                <td>
+                    <button class="btn btn-sm btn-danger" onclick="removeTicket(${userId}, ${t.ticket_number})">🗑️ Удалить</button>
+                </td>
+            </tr>
+        `).join('');
+        
+        const modal = `
+            <div class="modal fade" id="userTicketsModal" tabindex="-1">
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">🎟 Билетики пользователя ${userId}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <p>Всего билетиков: ${data.tickets.length}</p>
+                            <div class="table-responsive">
+                                <table class="table">
+                                    <thead>
+                                        <tr>
+                                            <th>№</th>
+                                            <th>Источник</th>
+                                            <th>Дата</th>
+                                            <th>Время</th>
+                                            <th>Действия</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>${ticketsHtml}</tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        document.body.insertAdjacentHTML('beforeend', modal);
+        const bsModal = new bootstrap.Modal(document.getElementById('userTicketsModal'));
+        bsModal.show();
+        
+        document.getElementById('userTicketsModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    } catch (error) {
+        alert('Ошибка: ' + error.message);
+    }
+}
+
+// Улучшенная страница статистики
+async function loadStats() {
+    const [daily, weekly, health, errors] = await Promise.all([
+        apiFetch('/stats/daily'),
+        apiFetch('/stats/weekly'),
+        apiFetch('/stats/health'),
+        apiFetch('/stats/errors?limit=10')
+    ]);
+    
+    const content = document.getElementById('content');
+    
+    const healthStatus = health.status === 'ok' ? 'success' : health.status === 'warning' ? 'warning' : 'danger';
+    const healthIcon = health.status === 'ok' ? '✅' : health.status === 'warning' ? '⚠️' : '❌';
+    
     content.innerHTML = `
         <h2>📈 Статистика</h2>
         
@@ -364,27 +644,56 @@ async function loadStats() {
                 </div>
             </div>
         </div>
+        
+        <div class="row mt-4">
+            <div class="col-md-6">
+                <div class="card border-${healthStatus}">
+                    <div class="card-body">
+                        <h5>${healthIcon} Здоровье системы</h5>
+                        <p><strong>Статус:</strong> ${health.status}</p>
+                        <p><strong>Scheduler:</strong> ${health.scheduler.status}</p>
+                        <p><strong>База данных:</strong> ${health.database.status}</p>
+                        <p><strong>Ошибок за час:</strong> ${health.errors.last_hour}</p>
+                        <p><strong>Всего ошибок:</strong> ${health.errors.total}</p>
+                        ${health.issues.length > 0 ? `
+                            <div class="alert alert-warning mt-2">
+                                <strong>Проблемы:</strong>
+                                <ul class="mb-0">
+                                    ${health.issues.map(issue => `<li>${issue}</li>`).join('')}
+                                </ul>
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h5>⚠️ Последние ошибки</h5>
+                        ${errors.errors.length > 0 ? `
+                            <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                                <table class="table table-sm">
+                                    <thead>
+                                        <tr>
+                                            <th>Время</th>
+                                            <th>Сообщение</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${errors.errors.map(e => `
+                                            <tr>
+                                                <td>${new Date(e.time).toLocaleString('ru-RU')}</td>
+                                                <td><small>${e.message.substring(0, 100)}${e.message.length > 100 ? '...' : ''}</small></td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                        ` : '<p>Ошибок не обнаружено ✅</p>'}
+                    </div>
+                </div>
+            </div>
+        </div>
     `;
-}
-
-// Функции для действий
-async function approveAnswer(raffleDate, userId) {
-    try {
-        await apiFetch(`/raffle/${raffleDate}/approve/${userId}`, { method: 'POST' });
-        alert('Ответ одобрен!');
-        loadPage('raffle');
-    } catch (error) {
-        alert('Ошибка: ' + error.message);
-    }
-}
-
-async function denyAnswer(raffleDate, userId) {
-    try {
-        await apiFetch(`/raffle/${raffleDate}/deny/${userId}`, { method: 'POST' });
-        alert('Ответ отклонен!');
-        loadPage('raffle');
-    } catch (error) {
-        alert('Ошибка: ' + error.message);
-    }
 }
 

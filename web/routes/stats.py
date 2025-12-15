@@ -178,3 +178,107 @@ async def get_weekly_report(admin_id: int = Depends(verify_admin)):
             }
         }
 
+@router.get("/health")
+async def get_system_health(admin_id: int = Depends(verify_admin)):
+    """Проверка состояния системы"""
+    from scheduler import scheduler
+    try:
+        from error_log import get_errors_count_since, recent_errors
+        
+        async with AsyncSessionLocal() as session:
+            # Активные пользователи (за последние 24 часа)
+            day_ago = datetime.now() - timedelta(days=1)
+            active_users = await session.scalar(
+                select(func.count(func.distinct(User.id))).where(
+                    User.created_at >= day_ago
+                )
+            )
+            
+            # Всего пользователей
+            total_users = await session.scalar(select(func.count(User.id)))
+            subscribed_users = await session.scalar(
+                select(func.count(User.id)).where(User.subscribed == True)
+            )
+            
+            # Статус scheduler
+            scheduler_status = "running" if scheduler and scheduler.running else "stopped"
+            
+            # Последние ошибки
+            recent_errors_count = get_errors_count_since(1)  # За последний час
+            total_errors = len(recent_errors)
+            
+            # Проверка базы данных
+            try:
+                await session.execute(select(1))
+                db_status = "connected"
+            except Exception as e:
+                db_status = f"error: {str(e)[:50]}"
+            
+            # Проверка критических компонентов
+            issues = []
+            if recent_errors_count > 10:
+                issues.append("Много ошибок за последний час")
+            if not scheduler or not scheduler.running:
+                issues.append("Scheduler не работает")
+            
+            return {
+                "status": "ok" if not issues else "warning",
+                "users": {
+                    "total": total_users or 0,
+                    "subscribed": subscribed_users or 0,
+                    "active_24h": active_users or 0
+                },
+                "scheduler": {
+                    "status": scheduler_status,
+                    "running": scheduler and scheduler.running
+                },
+                "database": {
+                    "status": db_status
+                },
+                "errors": {
+                    "last_hour": recent_errors_count,
+                    "total": total_errors
+                },
+                "issues": issues
+            }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+@router.get("/errors")
+async def get_recent_errors(
+    limit: int = 10,
+    admin_id: int = Depends(verify_admin)
+):
+    """Получить последние ошибки"""
+    try:
+        from error_log import get_recent_errors, recent_errors
+        
+        if limit > 50:
+            limit = 50
+        
+        errors = get_recent_errors(limit)
+        
+        result = []
+        for error in errors:
+            result.append({
+                "time": error['time'].isoformat(),
+                "message": error['message'],
+                "traceback": error.get('traceback')
+            })
+        
+        return {
+            "total": len(recent_errors),
+            "shown": len(result),
+            "errors": result
+        }
+    except Exception as e:
+        return {
+            "total": 0,
+            "shown": 0,
+            "errors": [],
+            "error": str(e)
+        }
+
