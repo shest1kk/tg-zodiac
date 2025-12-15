@@ -1,7 +1,7 @@
 """
 Роуты для управления пользователями
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select, func
 from database import AsyncSessionLocal, User
 from web.auth import verify_admin
