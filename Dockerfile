@@ -24,5 +24,8 @@ RUN mkdir -p /app/data && \
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# Открываем порт для веб-интерфейса
+EXPOSE 8000
+
 # Запуск бота (используем python для корректной обработки сигналов)
 CMD ["python", "-u", "bot.py"]

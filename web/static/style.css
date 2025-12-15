@@ -1,0 +1,40 @@
+body {
+    background-color: #f5f5f5;
+}
+
+.navbar {
+    margin-bottom: 20px;
+}
+
+.card {
+    margin-bottom: 20px;
+}
+
+.stat-card {
+    border-left: 4px solid #007bff;
+    padding: 15px;
+    margin-bottom: 15px;
+}
+
+.stat-card.success {
+    border-left-color: #28a745;
+}
+
+.stat-card.warning {
+    border-left-color: #ffc107;
+}
+
+.stat-card.danger {
+    border-left-color: #dc3545;
+}
+
+.loading {
+    text-align: center;
+    padding: 20px;
+}
+
+.table-responsive {
+    max-height: 600px;
+    overflow-y: auto;
+}
+

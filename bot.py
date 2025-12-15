@@ -6314,7 +6314,40 @@ async def main():
         from scheduler import set_bot
         set_bot(bot)
         start_scheduler()
-        logger.info("Бот запущен и готов к работе")
+        logger.info("✅ Планировщик запущен")
+        
+        # Запускаем веб-сервер
+        try:
+            from web.main import set_bot_instances
+            import os
+            
+            # Устанавливаем экземпляры бота и dispatcher для веб-интерфейса
+            set_bot_instances(bot, dp)
+            
+            # Получаем настройки веб-сервера из env
+            web_host = os.getenv("WEB_HOST", "0.0.0.0")
+            web_port = int(os.getenv("WEB_PORT", "8000"))
+            
+            # Запускаем веб-сервер в фоновой задаче
+            async def run_web_server():
+                import uvicorn
+                from web.main import app
+                config = uvicorn.Config(
+                    app,
+                    host=web_host,
+                    port=web_port,
+                    log_level="info",
+                    loop="asyncio"
+                )
+                server = uvicorn.Server(config)
+                await server.serve()
+            
+            asyncio.create_task(run_web_server())
+            logger.info(f"✅ Веб-сервер запущен на http://{web_host}:{web_port}")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось запустить веб-сервер: {e}", exc_info=True)
+        
+        logger.info("🤖 Бот запущен и готов к работе!")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except KeyboardInterrupt:
         logger.info("Получен сигнал остановки, завершаем работу...")

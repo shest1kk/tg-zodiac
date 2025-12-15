@@ -1,0 +1,70 @@
+"""
+FastAPI веб-сервер для управления ботом
+"""
+from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from web.auth import verify_admin
+from web.routes import tickets, users, quiz, raffle, stats
+
+# Глобальные переменные для доступа к боту и dispatcher
+bot_instance = None
+dp_instance = None
+
+def set_bot_instances(bot, dp):
+    """Устанавливает экземпляры бота и dispatcher для использования в роутах"""
+    global bot_instance, dp_instance
+    bot_instance = bot
+    dp_instance = dp
+
+def get_bot():
+    """Возвращает экземпляр бота"""
+    if bot_instance is None:
+        raise HTTPException(status_code=500, detail="Бот не инициализирован")
+    return bot_instance
+
+def get_dp():
+    """Возвращает экземпляр dispatcher"""
+    if dp_instance is None:
+        raise HTTPException(status_code=500, detail="Dispatcher не инициализирован")
+    return dp_instance
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    yield
+    # Shutdown
+
+app = FastAPI(
+    title="Zodiac Bot Admin Panel",
+    description="Веб-интерфейс для управления ботом",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Подключаем статические файлы и шаблоны
+base_dir = Path(__file__).parent
+app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
+templates = Jinja2Templates(directory=str(base_dir / "templates"))
+
+# Подключаем роуты
+app.include_router(tickets.router, prefix="/api/tickets", tags=["tickets"])
+app.include_router(users.router, prefix="/api/users", tags=["users"])
+app.include_router(quiz.router, prefix="/api/quiz", tags=["quiz"])
+app.include_router(raffle.router, prefix="/api/raffle", tags=["raffle"])
+app.include_router(stats.router, prefix="/api/stats", tags=["stats"])
+
+@app.get("/", response_class=HTMLResponse)
+async def root(request: Request, admin_id: int = Depends(verify_admin)):
+    """Главная страница админ-панели"""
+    return templates.TemplateResponse("index.html", {"request": request, "admin_id": admin_id})
+
+@app.get("/health")
+async def health():
+    """Проверка здоровья сервера"""
+    return {"status": "ok"}
+

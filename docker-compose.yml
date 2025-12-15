@@ -7,10 +7,14 @@ services:
     env_file: .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://bot:secret@postgres:5432/botdb
+      - WEB_HOST=0.0.0.0
+      - WEB_PORT=8000
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    ports:
+      - "8000:8000"  # Веб-интерфейс админ-панели
     volumes:
       - ./data:/app/data  # Монтирование папки с данными (для редактирования predictions.json через админ-панель)
     logging:
