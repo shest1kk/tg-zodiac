@@ -101,7 +101,21 @@ def get_all_questions(quiz_date: str) -> List[Dict]:
     if not quiz_data:
         return []
     
-    return list(quiz_data.values())
+    # Преобразуем словарь в список, сохраняя ID вопроса
+    questions = []
+    for question_id, question_data in quiz_data.items():
+        if isinstance(question_data, dict):
+            question_data = question_data.copy()
+            question_data['id'] = int(question_id) if question_id.isdigit() else question_id
+            questions.append(question_data)
+        else:
+            # Если данные не словарь, создаем минимальную структуру
+            questions.append({
+                'id': int(question_id) if question_id.isdigit() else question_id,
+                'question': str(question_data) if question_data else 'Нет текста'
+            })
+    
+    return questions
 
 
 def get_all_quiz_dates() -> List[str]:

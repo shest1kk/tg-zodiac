@@ -175,16 +175,16 @@ async function loadQuiz() {
     const content = document.getElementById('content');
     content.innerHTML = `
         <h2>🎯 Квизы</h2>
-        <div class="list-group">
+        <div class="list-group" id="quiz-list">
             ${dates.dates.map(date => {
                 const isDisabled = disabledSet.has(date);
                 return `
                     <div class="list-group-item d-flex justify-content-between align-items-center">
-                        <a href="#" class="flex-grow-1 text-decoration-none" data-quiz-date="${date}">
+                        <a href="#" class="flex-grow-1 text-decoration-none quiz-date-link" data-quiz-date="${date}">
                             ${date} ${isDisabled ? '<span class="badge bg-danger">Отключен</span>' : ''}
                         </a>
                         <div>
-                            <button class="btn btn-sm ${isDisabled ? 'btn-success' : 'btn-warning'}" onclick="toggleQuizDate('${date}')">
+                            <button class="btn btn-sm ${isDisabled ? 'btn-success' : 'btn-warning'}" onclick="event.stopPropagation(); toggleQuizDate('${date}'); return false;">
                                 ${isDisabled ? '✅ Включить' : '⏸️ Отключить'}
                             </button>
                         </div>
@@ -194,58 +194,102 @@ async function loadQuiz() {
         </div>
     `;
     
-    // Обработчики для дат квизов
-    document.querySelectorAll('[data-quiz-date]').forEach(item => {
-        item.addEventListener('click', async (e) => {
-            e.preventDefault();
-            const quizDate = item.dataset.quizDate;
-            await showQuizDetails(quizDate);
+    // Обработчики для дат квизов (используем делегирование событий)
+    const quizList = document.getElementById('quiz-list');
+    if (quizList) {
+        quizList.addEventListener('click', async (e) => {
+            const link = e.target.closest('.quiz-date-link');
+            if (link) {
+                e.preventDefault();
+                e.stopPropagation();
+                const quizDate = link.dataset.quizDate;
+                await showQuizDetails(quizDate);
+            }
         });
-    });
+    }
 }
 
 async function showQuizDetails(quizDate) {
-    const [stats, questions] = await Promise.all([
-        apiFetch(`/quiz/${quizDate}/stats`),
-        apiFetch(`/quiz/${quizDate}/questions`)
-    ]);
-    
-    const content = document.getElementById('content');
-    
-    const questionsHtml = questions.questions.map((q, idx) => `
-        <div class="card mb-2">
-            <div class="card-body">
-                <h6>Вопрос #${q.id || idx + 1}</h6>
-                <p><strong>${q.question || q.question_text || 'Нет текста'}</strong></p>
-                ${q.options ? `
-                    <ul>
-                        ${q.options.map((opt, i) => `
-                            <li>${i + 1}. ${opt} ${i === (q.correct_answer || q.correct) ? '✅' : ''}</li>
-                        `).join('')}
-                    </ul>
-                ` : ''}
-                <button class="btn btn-sm btn-primary" onclick="editQuizQuestion('${quizDate}', ${q.id || idx + 1})">✏️ Редактировать</button>
-            </div>
-        </div>
-    `).join('');
-    
-    content.innerHTML = `
-        <h2>🎯 Квиз ${quizDate}</h2>
-        <button class="btn btn-secondary mb-3" onclick="loadQuiz()">◀️ Назад к списку</button>
+    try {
+        const [stats, questions] = await Promise.all([
+            apiFetch(`/quiz/${quizDate}/stats`),
+            apiFetch(`/quiz/${quizDate}/questions`)
+        ]);
         
-        <div class="card mb-3">
-            <div class="card-body">
-                <h5>Статистика</h5>
-                <p>Всего участников: ${stats.total_participants}</p>
-                <p>Получили билетик: ${stats.with_tickets}</p>
-                <p>Не получили билетик: ${stats.no_tickets}</p>
-                <p>Не приняли участие: ${stats.non_participants}</p>
-            </div>
-        </div>
+        const content = document.getElementById('content');
         
-        <h5>Вопросы</h5>
-        ${questionsHtml}
-    `;
+        let questionsHtml = '<p>Вопросы не найдены</p>';
+        if (questions.questions && questions.questions.length > 0) {
+            questionsHtml = questions.questions.map((q, idx) => {
+                const questionId = q.id || (idx + 1);
+                const questionText = q.question || q.question_text || 'Нет текста';
+                const options = q.options || [];
+                const correctAnswer = q.correct_answer !== undefined ? q.correct_answer : (q.correct !== undefined ? q.correct : null);
+                
+                let optionsHtml = '';
+                if (options.length > 0) {
+                    if (typeof options === 'object' && !Array.isArray(options)) {
+                        // Если options - это объект типа {"A": "...", "Б": "..."}
+                        const optionKeys = Object.keys(options);
+                        optionsHtml = `
+                            <ul>
+                                ${optionKeys.map((key, i) => `
+                                    <li>${key}. ${options[key]} ${key === correctAnswer ? '✅' : ''}</li>
+                                `).join('')}
+                            </ul>
+                        `;
+                    } else {
+                        // Если options - это массив
+                        optionsHtml = `
+                            <ul>
+                                ${options.map((opt, i) => `
+                                    <li>${i + 1}. ${opt} ${i === correctAnswer ? '✅' : ''}</li>
+                                `).join('')}
+                            </ul>
+                        `;
+                    }
+                }
+                
+                return `
+                    <div class="card mb-2">
+                        <div class="card-body">
+                            <h6>Вопрос #${questionId}</h6>
+                            <p><strong>${questionText}</strong></p>
+                            ${optionsHtml}
+                            <button class="btn btn-sm btn-primary mt-2" onclick="editQuizQuestion('${quizDate}', ${questionId})">✏️ Редактировать</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        content.innerHTML = `
+            <h2>🎯 Квиз ${quizDate}</h2>
+            <button class="btn btn-secondary mb-3" onclick="loadQuiz()">◀️ Назад к списку</button>
+            
+            <div class="card mb-3">
+                <div class="card-body">
+                    <h5>Статистика</h5>
+                    <p>Всего участников: ${stats.total_participants || 0}</p>
+                    <p>Получили билетик: ${stats.with_tickets || 0}</p>
+                    <p>Не получили билетик: ${stats.no_tickets || 0}</p>
+                    <p>Не приняли участие: ${stats.non_participants || 0}</p>
+                </div>
+            </div>
+            
+            <h5>Вопросы</h5>
+            ${questionsHtml}
+        `;
+    } catch (error) {
+        const content = document.getElementById('content');
+        content.innerHTML = `
+            <h2>🎯 Квиз ${quizDate}</h2>
+            <button class="btn btn-secondary mb-3" onclick="loadQuiz()">◀️ Назад к списку</button>
+            <div class="alert alert-danger">
+                Ошибка при загрузке данных: ${error.message}
+            </div>
+        `;
+    }
 }
 
 async function toggleQuizDate(quizDate) {
