@@ -1565,16 +1565,41 @@ async def cmd_add_ticket(message: types.Message):
         
         user_id = int(parts[1])
         
-        # Получаем следующий номер билета
-        ticket_number = await get_next_raffle_ticket_number()
+        # Получаем информацию о пользователе и выдаем билет в одной транзакции с блокировкой
+        from quiz import _ticket_number_lock
+        ticket_number = None
         
-        # Получаем информацию о пользователе для сохранения
-        async with AsyncSessionLocal() as session:
-            user_result = await session.execute(
-                select(User).where(User.id == user_id)
-            )
-            user = user_result.scalar_one_or_none()
-            username = user.username if user else None
+        async with _ticket_number_lock:
+            async with AsyncSessionLocal() as session:
+                # Получаем информацию о пользователе
+                user_result = await session.execute(
+                    select(User).where(User.id == user_id)
+                )
+                user = user_result.scalar_one_or_none()
+                username = user.username if user else None
+                
+                if not user:
+                    await message.answer(f"❌ Пользователь с ID {user_id} не найден")
+                    return
+                
+                # Получаем следующий номер билета внутри транзакции
+                ticket_number = await get_next_raffle_ticket_number(session=session)
+                
+                # Создаем запись о билете в розыгрыше (используем текущую дату)
+                from datetime import datetime
+                from raffle import RaffleParticipant
+                current_date = datetime.now().strftime("%Y-%m-%d")
+                
+                participant = RaffleParticipant(
+                    user_id=user_id,
+                    raffle_date=current_date,
+                    ticket_number=ticket_number,
+                    is_correct=True,
+                    timestamp=datetime.utcnow()
+                )
+                session.add(participant)
+                await session.commit()
+                # Блокировка освобождается после commit
         
         # Отправляем пользователю сообщение с картинкой в одном сообщении
         message_text = f"Администратор выдал вам билетик №{ticket_number}"
@@ -1608,28 +1633,8 @@ async def cmd_add_ticket(message: types.Message):
             await message.answer(f"❌ Не удалось отправить сообщение пользователю {user_id}. Возможно, он заблокировал бота.")
             return
         
-        # Сохраняем информацию о выданном билете в QuizResult для отслеживания номеров
-        # Используем дату "manual" для ручной выдачи админом
-        try:
-            async with AsyncSessionLocal() as session:
-                result = QuizResult(
-                    user_id=user_id,
-                    username=username,
-                    quiz_date="manual",  # Специальная дата для ручной выдачи
-                    correct_answers=0,
-                    total_questions=0,
-                    ticket_number=ticket_number,
-                    completed_at=datetime.utcnow()
-                )
-                session.add(result)
-                await session.commit()
-                logger.info(f"Информация о выданном билете №{ticket_number} сохранена в БД для пользователя {user_id}")
-        except Exception as e:
-            logger.error(f"Ошибка при сохранении информации о билете в БД: {e}", exc_info=True)
-            # Продолжаем работу, даже если не удалось сохранить
-        
-        await message.answer(f"✅ Билет №{ticket_number} успешно выдан пользователю {user_id}")
-        
+        # Билет уже сохранен в RaffleParticipant выше, внутри блокировки
+        await message.answer(f"✅ Билетик №{ticket_number} успешно выдан пользователю {user_id}")
         logger.info(f"Админ {message.from_user.id} выдал билет №{ticket_number} пользователю {user_id}")
         
     except ValueError:
@@ -6191,99 +6196,109 @@ async def finish_quiz(bot, user_id: int, quiz_date: str, answers: dict, last_que
             username = user.username if user else None
         
         # Сохраняем результат
-        async with AsyncSessionLocal() as session:
-            if correct_count >= QUIZ_MIN_CORRECT_ANSWERS:
-                # >= 3/5 - выдаем билетик
-                ticket_number = await get_next_ticket_number()
+        # Используем блокировку для предотвращения race condition при выдаче билетов
+        from quiz import _ticket_number_lock
+        ticket_number = None
+        
+        async with _ticket_number_lock:
+            async with AsyncSessionLocal() as session:
+                if correct_count >= QUIZ_MIN_CORRECT_ANSWERS:
+                    # >= 3/5 - выдаем билетик
+                    # Передаем сессию, чтобы номер был получен в той же транзакции
+                    ticket_number = await get_next_ticket_number(session=session)
+                    
+                    result = QuizResult(
+                        user_id=user_id,
+                        username=username,
+                        quiz_date=quiz_date,
+                        correct_answers=correct_count,
+                        total_questions=total_questions,
+                        ticket_number=ticket_number,
+                        completed_at=datetime.utcnow()
+                    )
+                else:
+                    # Меньше 3 правильных ответов
+                    result = QuizResult(
+                        user_id=user_id,
+                        username=username,
+                        quiz_date=quiz_date,
+                        correct_answers=correct_count,
+                        total_questions=total_questions,
+                        ticket_number=None,  # Прочерк
+                        completed_at=datetime.utcnow()
+                    )
                 
-                # Отправляем картинку с билетиком
-                ticket_path = Path("data/билет.png")
-                if ticket_path.exists():
-                    caption = f"№{ticket_number}"
-                    try:
-                        # Открываем файл и отправляем через InputFile
-                        photo_file = FSInputFile(str(ticket_path.absolute()))
-                        photo_sent = await safe_send_photo(bot, user_id, photo_file, caption=caption)
-                        if not photo_sent:
-                            # Если не удалось отправить фото, отправляем текстовое сообщение
-                            logger.warning(f"Не удалось отправить фото билетика пользователю {user_id}, отправляем текст")
-                            await safe_send_message(
-                                bot, user_id,
-                                f"№{ticket_number}"
-                            )
-                    except Exception as e:
-                        logger.error(f"Ошибка при отправке фото билетика пользователю {user_id}: {e}", exc_info=True)
+                session.add(result)
+                await session.commit()
+                # Блокировка освобождается после commit
+        
+        # Отправляем сообщения ПОСЛЕ сохранения в БД (чтобы не держать блокировку долго)
+        if correct_count >= QUIZ_MIN_CORRECT_ANSWERS:
+            # Отправляем картинку с билетиком
+            ticket_path = Path("data/билет.png")
+            if ticket_path.exists():
+                caption = f"№{ticket_number}"
+                try:
+                    # Открываем файл и отправляем через InputFile
+                    photo_file = FSInputFile(str(ticket_path.absolute()))
+                    photo_sent = await safe_send_photo(bot, user_id, photo_file, caption=caption)
+                    if not photo_sent:
+                        # Если не удалось отправить фото, отправляем текстовое сообщение
+                        logger.warning(f"Не удалось отправить фото билетика пользователю {user_id}, отправляем текст")
                         await safe_send_message(
                             bot, user_id,
                             f"№{ticket_number}"
                         )
-                else:
-                    logger.warning(f"Файл билет.png не найден по пути {ticket_path.absolute()}")
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке фото билетика пользователю {user_id}: {e}", exc_info=True)
                     await safe_send_message(
                         bot, user_id,
                         f"№{ticket_number}"
                     )
-                
-                # Уведомляем админов
-                admin_message = (
-                    f"🎯 Пользователь с ID {user_id}"
-                    + (f" @{username}" if username else "")
-                    + f" ответил на {correct_count}/{total_questions} вопросов правильно "
-                    f"и получил лотерейный билетик №{ticket_number}"
-                )
-                for admin_id in ADMIN_IDS:
-                    await safe_send_message(bot, admin_id, admin_message)
-                
-                result = QuizResult(
-                    user_id=user_id,
-                    username=username,
-                    quiz_date=quiz_date,
-                    correct_answers=correct_count,
-                    total_questions=total_questions,
-                    ticket_number=ticket_number,
-                    completed_at=datetime.utcnow()
-                )
             else:
-                # Меньше 3 правильных ответов - отправляем детальное сообщение
-                if wrong_answers:
-                    message_text = "❌ К сожалению, ты ошибся в нескольких вопросах:\n\n"
-                    
-                    for q_num, question_text, user_answer_text, correct_answer_text in wrong_answers:
-                        # Экранируем HTML-символы для безопасного отображения
-                        question_text_escaped = html.escape(question_text)
-                        user_answer_text_escaped = html.escape(str(user_answer_text))
-                        correct_answer_text_escaped = html.escape(str(correct_answer_text))
-                        
-                        message_text += (
-                            f"<b>№{q_num}</b> | {question_text_escaped}\n"
-                            f"Твой ответ: {user_answer_text_escaped}\n"
-                            f"Правильный ответ: {correct_answer_text_escaped}\n\n"
-                        )
-                    
-                    message_text += "💪 Уверен, в следующий раз получится ответить без ошибок!"
-                    await safe_send_message(bot, user_id, message_text, parse_mode="HTML")
-                
-                # Уведомляем админов
-                admin_message = (
-                    f"📊 Пользователь с ID {user_id}"
-                    + (f" @{username}" if username else "")
-                    + f" прошел квиз, но ответил на {correct_count}/{total_questions} правильных вопросов"
-                )
-                for admin_id in ADMIN_IDS:
-                    await safe_send_message(bot, admin_id, admin_message)
-                
-                result = QuizResult(
-                    user_id=user_id,
-                    username=username,
-                    quiz_date=quiz_date,
-                    correct_answers=correct_count,
-                    total_questions=total_questions,
-                    ticket_number=None,  # Прочерк
-                    completed_at=datetime.utcnow()
+                logger.warning(f"Файл билет.png не найден по пути {ticket_path.absolute()}")
+                await safe_send_message(
+                    bot, user_id,
+                    f"№{ticket_number}"
                 )
             
-            session.add(result)
-            await session.commit()
+            # Уведомляем админов
+            admin_message = (
+                f"🎯 Пользователь с ID {user_id}"
+                + (f" @{username}" if username else "")
+                + f" ответил на {correct_count}/{total_questions} вопросов правильно "
+                f"и получил лотерейный билетик №{ticket_number}"
+            )
+            for admin_id in ADMIN_IDS:
+                await safe_send_message(bot, admin_id, admin_message)
+        else:
+            # Меньше 3 правильных ответов - отправляем детальное сообщение
+            if wrong_answers:
+                message_text = "❌ К сожалению, ты ошибся в нескольких вопросах:\n\n"
+                
+                for q_num, question_text, user_answer_text, correct_answer_text in wrong_answers:
+                    # Экранируем HTML-символы для безопасного отображения
+                    question_text_escaped = html.escape(question_text)
+                    user_answer_text_escaped = html.escape(str(user_answer_text))
+                    correct_answer_text_escaped = html.escape(str(correct_answer_text))
+                    
+                    message_text += (
+                        f"<b>№{q_num}</b> | {question_text_escaped}\n"
+                        f"Твой ответ: {user_answer_text_escaped}\n"
+                        f"Правильный ответ: {correct_answer_text_escaped}\n\n"
+                    )
+                
+                message_text += "💪 Уверен, в следующий раз получится ответить без ошибок!"
+                await safe_send_message(bot, user_id, message_text, parse_mode="HTML")
+            
+            # Уведомляем админов
+            admin_message = (
+                f"📊 Пользователь с ID {user_id}"
+                + (f" @{username}" if username else "")
+                + f" прошел квиз, но ответил на {correct_count}/{total_questions} правильных вопросов"
+            )
+            for admin_id in ADMIN_IDS:
+                await safe_send_message(bot, admin_id, admin_message)
         
         logger.info(f"Квиз завершен для пользователя {user_id}: {correct_count}/{total_questions}")
         

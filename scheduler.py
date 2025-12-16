@@ -307,7 +307,13 @@ def start_scheduler():
     # Добавляем задачи для каждой конкретной даты розыгрыша
     now_utc = datetime.now(timezone.utc)
     
-    for raffle_date_str in RAFFLE_DATES:
+    # Исключаем завтрашнюю дату из расписания розыгрышей (если она там есть)
+    tomorrow_date = (datetime.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+    filtered_raffle_dates = [d for d in RAFFLE_DATES if d != tomorrow_date]
+    if tomorrow_date in RAFFLE_DATES:
+        logger.info(f"⏭️ Розыгрыш для {tomorrow_date} исключен из расписания")
+    
+    for raffle_date_str in filtered_raffle_dates:
         raffle_date_obj = datetime.strptime(raffle_date_str, "%Y-%m-%d")
         
         # Дата и время для объявления (конвертируется из МСК в UTC)
@@ -409,7 +415,10 @@ def start_scheduler():
     # Планируем квизы только для указанного периода
     current_date = start_date
     # Даты, когда квизы отключены
-    QUIZ_DISABLED_DATES = ["2025-12-15"]
+    # Добавляем завтрашнюю дату для гарантии, что квизы не запустятся
+    from datetime import datetime as dt, timedelta
+    tomorrow_date = (dt.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+    QUIZ_DISABLED_DATES = ["2025-12-15", tomorrow_date]
     
     while current_date <= end_date:
         quiz_date_str = current_date.strftime("%Y-%m-%d")
@@ -473,12 +482,15 @@ def start_scheduler():
     
     scheduler.start()
     
+    # Формируем список дат розыгрышей для логирования
+    raffle_dates_for_log = ', '.join(filtered_raffle_dates) if 'filtered_raffle_dates' in locals() else ', '.join(RAFFLE_DATES)
+    
     logger.info(
         f"📅 Планировщик запущен.\n"
         f"   Рассылка: каждый день в {DAILY_HOUR:02d}:{DAILY_MINUTE:02d} МСК ({daily_utc_hour:02d}:{daily_utc_minute:02d} UTC)\n"
         f"   Период: с 01.12.2025 по 31.12.2025 (31 день)\n"
         f"   🎁 Розыгрыши: в {RAFFLE_HOUR:02d}:{RAFFLE_MINUTE:02d} МСК ({raffle_utc_hour:02d}:{raffle_utc_minute:02d} UTC)\n"
-        f"   Даты: {', '.join(RAFFLE_DATES)}\n"
+        f"   Даты: {raffle_dates_for_log}\n"
         f"   🎯 Квизы: каждый день в {QUIZ_HOUR:02d}:{QUIZ_MINUTE:02d} МСК ({quiz_utc_hour:02d}:{quiz_utc_minute:02d} UTC) начиная с {QUIZ_START_DATE}"
     )
 
@@ -643,7 +655,10 @@ async def send_raffle_reminders_for_date(raffle_date: str):
 async def send_quiz_announcements_for_date(quiz_date: str):
     """Рассылка объявлений о квизе для конкретной даты"""
     # Проверяем, не отключен ли квиз для этой даты
-    QUIZ_DISABLED_DATES = ["2025-12-15"]
+    # Добавляем завтрашнюю дату для гарантии
+    from datetime import datetime as dt, timedelta
+    tomorrow_date = (dt.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+    QUIZ_DISABLED_DATES = ["2025-12-15", tomorrow_date]
     if quiz_date in QUIZ_DISABLED_DATES:
         logger.info(f"⏭️ Квиз для {quiz_date} отключен, объявления не отправляются")
         return
@@ -690,7 +705,10 @@ async def send_quiz_announcements_for_date(quiz_date: str):
 async def send_quiz_reminders_for_date(quiz_date: str):
     """Отправка напоминаний о квизе для конкретной даты"""
     # Проверяем, не отключен ли квиз для этой даты
-    QUIZ_DISABLED_DATES = ["2025-12-15"]
+    # Добавляем завтрашнюю дату для гарантии
+    from datetime import datetime as dt, timedelta
+    tomorrow_date = (dt.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+    QUIZ_DISABLED_DATES = ["2025-12-15", tomorrow_date]
     if quiz_date in QUIZ_DISABLED_DATES:
         logger.info(f"⏭️ Квиз для {quiz_date} отключен, напоминания не отправляются")
         return
@@ -737,7 +755,10 @@ async def send_quiz_reminders_for_date(quiz_date: str):
 async def mark_quiz_non_participants_for_date(quiz_date: str):
     """Отмечает пользователей, которые не приняли участие в квизе"""
     # Проверяем, не отключен ли квиз для этой даты
-    QUIZ_DISABLED_DATES = ["2025-12-15"]
+    # Добавляем завтрашнюю дату для гарантии
+    from datetime import datetime as dt, timedelta
+    tomorrow_date = (dt.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+    QUIZ_DISABLED_DATES = ["2025-12-15", tomorrow_date]
     if quiz_date in QUIZ_DISABLED_DATES:
         logger.info(f"⏭️ Квиз для {quiz_date} отключен, отметка не принимавших участие не выполняется")
         return

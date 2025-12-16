@@ -931,72 +931,33 @@ async def get_users_for_reminder(raffle_date: str) -> List[RaffleParticipant]:
         return []
 
 
-async def get_next_raffle_ticket_number() -> int:
+async def get_next_raffle_ticket_number(session=None) -> int:
     """Получает следующий номер билетика для розыгрыша
     Ищет максимальный номер из QuizResult и RaffleParticipant
     
     Использует блокировку для предотвращения race condition при одновременных запросах
     Проверяет на дубли и уведомляет админов при обнаружении
+    
+    Args:
+        session: Опциональная сессия БД. Если не указана, создается новая.
+                 Если указана, блокировка уже должна быть захвачена вызывающим кодом.
     """
     # Импортируем блокировку из quiz.py для синхронизации между квизами и розыгрышами
-    from quiz import _ticket_number_lock, _notify_admins_about_duplicate_ticket
+    from quiz import _ticket_number_lock, _notify_admins_about_duplicate_ticket, _get_next_ticket_number_internal
     
-    async with _ticket_number_lock:  # Блокируем доступ для предотвращения дублей
-        try:
-            async with AsyncSessionLocal() as session:
-                # Находим максимальный номер билетика из квизов
-                quiz_result = await session.execute(
-                    select(func.max(QuizResult.ticket_number)).where(
-                        QuizResult.ticket_number.isnot(None)
-                    )
-                )
-                max_quiz_ticket = quiz_result.scalar_one_or_none()
-                
-                # Находим максимальный номер билетика из розыгрышей
-                raffle_result = await session.execute(
-                    select(func.max(RaffleParticipant.ticket_number)).where(
-                        RaffleParticipant.ticket_number.isnot(None)
-                    )
-                )
-                max_raffle_ticket = raffle_result.scalar_one_or_none()
-                
-                # Берем максимальный из двух
-                max_ticket = None
-                if max_quiz_ticket is not None:
-                    max_ticket = max_quiz_ticket
-                if max_raffle_ticket is not None:
-                    if max_ticket is None or max_raffle_ticket > max_ticket:
-                        max_ticket = max_raffle_ticket
-                
-                # Если нет билетов, начинаем с 424 (423+1, как указал пользователь)
-                if max_ticket is None:
-                    next_ticket = 424
-                else:
-                    next_ticket = max_ticket + 1
-                
-                # Проверяем на дубли (на всякий случай, хотя блокировка должна предотвратить)
-                duplicate_check_quiz = await session.execute(
-                    select(QuizResult).where(QuizResult.ticket_number == next_ticket)
-                )
-                duplicate_quiz = duplicate_check_quiz.scalars().first()
-                
-                duplicate_check_raffle = await session.execute(
-                    select(RaffleParticipant).where(RaffleParticipant.ticket_number == next_ticket)
-                )
-                duplicate_raffle = duplicate_check_raffle.scalars().first()
-                
-                if duplicate_quiz or duplicate_raffle:
-                    # Обнаружен дубль! Уведомляем админов
-                    await _notify_admins_about_duplicate_ticket(next_ticket, duplicate_quiz, duplicate_raffle)
-                    # Выдаем следующий номер
-                    next_ticket += 1
-                    logger.error(f"⚠️ Обнаружен дубль билетика №{next_ticket - 1}! Выдан следующий номер: {next_ticket}")
-                
-                return next_ticket
-                
-        except Exception as e:
-            logger.error(f"Ошибка при получении следующего номера билетика для розыгрыша: {e}")
-            return 424
+    # Если сессия передана, используем её (блокировка уже должна быть захвачена вызывающим кодом)
+    # Если нет, создаем новую сессию и захватываем блокировку
+    if session is None:
+        async with _ticket_number_lock:
+            try:
+                async with AsyncSessionLocal() as new_session:
+                    return await _get_next_ticket_number_internal(new_session, start_number=424)
+            except Exception as e:
+                logger.error(f"Ошибка при получении следующего номера билетика для розыгрыша: {e}")
+                return 424
+    else:
+        # Сессия передана - предполагаем, что блокировка уже захвачена
+        return await _get_next_ticket_number_internal(session, start_number=424)
 
 
 async def approve_answer(user_id: int, raffle_date: str) -> bool:
@@ -1022,11 +983,14 @@ async def approve_answer(user_id: int, raffle_date: str) -> bool:
             
             participant.is_correct = True
             
-            # Получаем следующий номер билета
-            ticket_number = await get_next_raffle_ticket_number()
-            participant.ticket_number = ticket_number
-            
-            await session.commit()
+            # Получаем следующий номер билета внутри блокировки и транзакции
+            from quiz import _ticket_number_lock
+            async with _ticket_number_lock:
+                # Передаем сессию, чтобы номер был получен в той же транзакции
+                ticket_number = await get_next_raffle_ticket_number(session=session)
+                participant.ticket_number = ticket_number
+                await session.commit()
+                # Блокировка освобождается после commit
             
             # Отправляем пользователю сообщение с картинкой в одном сообщении
             from aiogram import Bot
