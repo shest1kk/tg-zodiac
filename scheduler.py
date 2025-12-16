@@ -416,8 +416,7 @@ def start_scheduler():
     current_date = start_date
     # Даты, когда квизы отключены
     # Добавляем завтрашнюю дату для гарантии, что квизы не запустятся
-    from datetime import datetime as dt, timedelta
-    tomorrow_date = (dt.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow_date = (datetime.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
     QUIZ_DISABLED_DATES = ["2025-12-15", tomorrow_date]
     
     while current_date <= end_date:
