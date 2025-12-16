@@ -1593,6 +1593,9 @@ async def cmd_add_ticket(message: types.Message):
                 participant = RaffleParticipant(
                     user_id=user_id,
                     raffle_date=current_date,
+                    question_id=0,  # тех. значение для ручной выдачи
+                    question_text="manual",
+                    answer="admin_grant",
                     ticket_number=ticket_number,
                     is_correct=True,
                     timestamp=datetime.utcnow()
