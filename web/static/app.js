@@ -165,7 +165,7 @@ async function loadDashboard() {
 
 // Квизы
 async function loadQuiz() {
-    const [quizList, disabledDates] = await Promise.all([
+    const [quizListData, disabledDates] = await Promise.all([
         apiFetch('/quiz/list'),
         apiFetch('/quiz/disabled-dates')
     ]);
@@ -176,7 +176,7 @@ async function loadQuiz() {
     content.innerHTML = `
         <h2>🎯 Квизы</h2>
         <div class="list-group" id="quiz-list">
-            ${(quizList.quizzes || []).map(item => {
+            ${(quizListData.quizzes || []).map(item => {
                 const date = item.quiz_date;
                 const title = item.title ? ` — <span class="text-muted">${escapeHtml(item.title)}</span>` : '';
                 const startsAt = item.starts_at_msk ? `<small class="text-muted">(${escapeHtml(item.starts_at_msk)} МСК)</small>` : '';
@@ -205,9 +205,9 @@ async function loadQuiz() {
     `;
     
     // Обработчики для дат квизов (используем делегирование событий)
-    const quizList = document.getElementById('quiz-list');
-    if (quizList) {
-        quizList.addEventListener('click', async (e) => {
+    const quizListEl = document.getElementById('quiz-list');
+    if (quizListEl) {
+        quizListEl.addEventListener('click', async (e) => {
             const link = e.target.closest('.quiz-date-link');
             if (link) {
                 e.preventDefault();
