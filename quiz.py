@@ -155,6 +155,146 @@ def save_quiz_data(quiz_data: Dict) -> bool:
         return False
 
 
+def _ensure_quiz_date_new_format(all_data: Dict, quiz_date: str) -> bool:
+    """Гарантирует новый формат записи по дате: {meta, questions}. Возвращает True если меняли данные."""
+    if not all_data or "quiz_dates" not in all_data or not isinstance(all_data["quiz_dates"], dict):
+        return False
+
+    entry = all_data["quiz_dates"].get(quiz_date)
+    if entry is None:
+        return False
+
+    # Уже новый формат
+    if isinstance(entry, dict) and "questions" in entry:
+        if "meta" not in entry or not isinstance(entry.get("meta"), dict):
+            entry["meta"] = {}
+            return True
+        return False
+
+    # Старый формат: entry = {"1": {...}, ...}
+    if isinstance(entry, dict):
+        all_data["quiz_dates"][quiz_date] = {"meta": {}, "questions": entry}
+        return True
+
+    return False
+
+
+def set_quiz_meta_from_local(quiz_date: str, title: str, starts_at_local: str) -> Dict:
+    """Обновляет meta квиза (title, starts_at) по дате.
+
+    starts_at_local: YYYY-MM-DDTHH:MM (интерпретируем как МСК)
+    """
+    if not isinstance(title, str) or not title.strip():
+        return {"success": False, "error": "Заголовок обязателен"}
+    if not isinstance(starts_at_local, str) or not starts_at_local.strip():
+        return {"success": False, "error": "Дата/время обязательны"}
+
+    try:
+        starts_at_dt = datetime.fromisoformat(starts_at_local.strip())
+        if starts_at_dt.tzinfo is not None:
+            starts_at_dt = starts_at_dt.astimezone(MOSCOW_TZ)
+        else:
+            starts_at_dt = starts_at_dt.replace(tzinfo=MOSCOW_TZ)
+        starts_at_dt = starts_at_dt.astimezone(MOSCOW_TZ)
+    except Exception:
+        return {"success": False, "error": "Неверный формат даты/времени (ожидается YYYY-MM-DDTHH:MM)"}
+
+    if starts_at_dt.date().strftime("%Y-%m-%d") != quiz_date:
+        return {"success": False, "error": "Дата starts_at должна совпадать с quiz_date. Для переноса используйте дублирование."}
+
+    all_data = load_all_quiz_data()
+    if not all_data:
+        return {"success": False, "error": "quiz.json не найден или поврежден"}
+    if "quiz_dates" not in all_data or not isinstance(all_data["quiz_dates"], dict):
+        return {"success": False, "error": "Неверная структура quiz.json"}
+    if quiz_date not in all_data["quiz_dates"]:
+        return {"success": False, "error": "Квиз не найден"}
+
+    changed = _ensure_quiz_date_new_format(all_data, quiz_date)
+    entry = all_data["quiz_dates"][quiz_date]
+    if "meta" not in entry or not isinstance(entry.get("meta"), dict):
+        entry["meta"] = {}
+        changed = True
+
+    entry["meta"]["title"] = title.strip()
+    entry["meta"]["starts_at"] = starts_at_dt.isoformat()
+    changed = True
+
+    if not save_quiz_data(all_data):
+        return {"success": False, "error": "Не удалось сохранить quiz.json"}
+
+    return {"success": True, "quiz_date": quiz_date, "changed": changed}
+
+
+def duplicate_quiz_from_local(source_quiz_date: str, starts_at_local: str, title: str) -> Dict:
+    """Дублирует квиз с новой датой/временем и заголовком, копируя вопросы."""
+    if not isinstance(source_quiz_date, str) or not source_quiz_date.strip():
+        return {"success": False, "error": "source_quiz_date обязателен"}
+    if not isinstance(title, str) or not title.strip():
+        return {"success": False, "error": "Заголовок обязателен"}
+    if not isinstance(starts_at_local, str) or not starts_at_local.strip():
+        return {"success": False, "error": "Дата/время обязательны"}
+
+    try:
+        starts_at_dt = datetime.fromisoformat(starts_at_local.strip())
+        if starts_at_dt.tzinfo is not None:
+            starts_at_dt = starts_at_dt.astimezone(MOSCOW_TZ)
+        else:
+            starts_at_dt = starts_at_dt.replace(tzinfo=MOSCOW_TZ)
+        starts_at_dt = starts_at_dt.astimezone(MOSCOW_TZ)
+    except Exception:
+        return {"success": False, "error": "Неверный формат даты/времени (ожидается YYYY-MM-DDTHH:MM)"}
+
+    target_quiz_date = starts_at_dt.date().strftime("%Y-%m-%d")
+
+    all_data = load_all_quiz_data()
+    if not all_data:
+        all_data = {"quiz_dates": {}}
+    if "quiz_dates" not in all_data or not isinstance(all_data["quiz_dates"], dict):
+        all_data["quiz_dates"] = {}
+
+    if source_quiz_date not in all_data["quiz_dates"]:
+        return {"success": False, "error": "Исходный квиз не найден"}
+    if target_quiz_date in all_data["quiz_dates"]:
+        return {"success": False, "error": f"Квиз на дату {target_quiz_date} уже существует"}
+
+    # Берём вопросы из source (поддержка обоих форматов)
+    source_entry = all_data["quiz_dates"][source_quiz_date]
+    if isinstance(source_entry, dict) and "questions" in source_entry:
+        source_questions = source_entry.get("questions") or {}
+    else:
+        source_questions = source_entry if isinstance(source_entry, dict) else {}
+
+    # Нормализуем копию вопросов
+    questions_dict = {}
+    idx = 1
+    for k in sorted(source_questions.keys(), key=lambda x: int(x) if str(x).isdigit() else str(x)):
+        q = source_questions.get(k)
+        if not isinstance(q, dict):
+            continue
+        questions_dict[str(idx)] = {
+            "id": idx,
+            "question": q.get("question") or "",
+            "options": q.get("options") or {},
+            "correct_answer": str(q.get("correct_answer") or "1"),
+        }
+        idx += 1
+    if not questions_dict:
+        return {"success": False, "error": "В исходном квизе нет вопросов"}
+
+    all_data["quiz_dates"][target_quiz_date] = {
+        "meta": {
+            "title": title.strip(),
+            "starts_at": starts_at_dt.isoformat(),
+        },
+        "questions": questions_dict,
+    }
+
+    if not save_quiz_data(all_data):
+        return {"success": False, "error": "Не удалось сохранить quiz.json"}
+
+    return {"success": True, "quiz_date": target_quiz_date}
+
 def get_quiz_meta(quiz_date: str) -> Dict:
     """Возвращает метаданные квиза для даты (title, starts_at и т.д.).
 
@@ -366,8 +506,11 @@ async def send_quiz_announcement(bot, user_id: int, quiz_date: str, force_send: 
         except:
             date_display = quiz_date
         
+        quiz_title = get_quiz_title(quiz_date)
+        title_block = f"<b>{quiz_title}</b>\n\n" if quiz_title else ""
         announcement_text = (
             f"🎯 <b>Квиз начинается!</b>\n\n"
+            f"{title_block}"
             f"Нажми на кнопку ниже, чтобы принять участие.\n"
             f"У тебя есть 6 часов, чтобы начать квиз!"
         )

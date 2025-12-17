@@ -148,6 +148,49 @@ async def create_quiz(
     return {"success": True, "quiz_date": quiz_date, "scheduled": scheduled}
 
 
+@router.put("/{quiz_date}/meta")
+async def update_quiz_meta(
+    quiz_date: str,
+    data: dict = Body(...),
+    username: str = Depends(get_current_user)
+):
+    """Обновить заголовок/время старта квиза (meta) и пересоздать задачи планировщика."""
+    from quiz import set_quiz_meta_from_local
+    from scheduler import reschedule_quiz_jobs_if_running
+
+    title = data.get("title")
+    starts_at_local = data.get("starts_at_local")
+
+    result = set_quiz_meta_from_local(quiz_date, title, starts_at_local)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "Ошибка")
+
+    scheduled = reschedule_quiz_jobs_if_running(quiz_date)
+    return {"success": True, "quiz_date": quiz_date, "scheduled": scheduled}
+
+
+@router.post("/duplicate")
+async def duplicate_quiz(
+    data: dict = Body(...),
+    username: str = Depends(get_current_user)
+):
+    """Дублировать квиз на новую дату/время, копируя вопросы."""
+    from quiz import duplicate_quiz_from_local
+    from scheduler import schedule_quiz_jobs_if_running
+
+    source_quiz_date = data.get("source_quiz_date")
+    starts_at_local = data.get("starts_at_local")
+    title = data.get("title")
+
+    result = duplicate_quiz_from_local(source_quiz_date, starts_at_local, title)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "Ошибка")
+
+    quiz_date = result["quiz_date"]
+    scheduled = schedule_quiz_jobs_if_running(quiz_date)
+    return {"success": True, "quiz_date": quiz_date, "scheduled": scheduled}
+
+
 @router.get("/{quiz_date}/stats")
 async def get_quiz_stats(quiz_date: str, username: str = Depends(get_current_user)):
     """Получить статистику по квизу"""

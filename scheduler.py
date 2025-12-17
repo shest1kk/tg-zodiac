@@ -155,6 +155,54 @@ def _schedule_all_quizzes_from_json():
         logger.error(f"Ошибка при планировании квизов из quiz.json: {e}", exc_info=True)
 
 
+def get_jobs_snapshot() -> dict:
+    """Снимок состояния APScheduler для админки."""
+    global scheduler
+    if not scheduler:
+        return {"running": False, "jobs": []}
+
+    jobs = []
+    try:
+        for j in scheduler.get_jobs():
+            next_run = None
+            try:
+                next_run = j.next_run_time.isoformat() if j.next_run_time else None
+            except Exception:
+                next_run = None
+
+            jobs.append({
+                "id": j.id,
+                "name": getattr(j, "name", None),
+                "next_run_time": next_run,
+                "trigger": str(j.trigger) if getattr(j, "trigger", None) else None,
+            })
+    except Exception as e:
+        return {"running": bool(getattr(scheduler, "running", False)), "jobs": [], "error": str(e)}
+
+    # Стабильная сортировка: сначала с временем, потом без
+    def _sort_key(x):
+        return (x["next_run_time"] is None, x["next_run_time"] or "", x["id"])
+
+    jobs.sort(key=_sort_key)
+    return {"running": bool(getattr(scheduler, "running", False)), "jobs": jobs}
+
+
+def reschedule_quiz_jobs_if_running(quiz_date: str) -> bool:
+    """Удаляет и пересоздаёт задачи конкретного квиза (если scheduler запущен)."""
+    global scheduler
+    if not scheduler or not getattr(scheduler, "running", False):
+        return False
+
+    for job_id in (f"quiz_announcements_{quiz_date}", f"quiz_reminders_{quiz_date}", f"quiz_mark_{quiz_date}"):
+        try:
+            scheduler.remove_job(job_id)
+        except Exception:
+            pass
+
+    _schedule_quiz_jobs_for_date(quiz_date)
+    return True
+
+
 def load_predictions():
     """Загружает данные предсказаний из файла (синхронная версия для обратной совместимости)"""
     predictions_path = Path("data/predictions.json")

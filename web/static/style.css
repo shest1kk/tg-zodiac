@@ -38,3 +38,23 @@ body {
     overflow-y: auto;
 }
 
+/* Toasts */
+#toast-container {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 2000;
+    width: min(420px, calc(100vw - 32px));
+}
+
+/* Global loading overlay */
+#global-loading {
+    position: fixed;
+    inset: 0;
+    background: rgba(255, 255, 255, 0.65);
+    z-index: 1900;
+    display: none;
+    align-items: center;
+    justify-content: center;
+}
+

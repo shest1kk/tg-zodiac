@@ -2,6 +2,84 @@
 
 const API_BASE = '/api';
 
+// ----------------- UX helpers (toasts + global loader) -----------------
+let _loadingCount = 0;
+
+function ensureUiScaffolding() {
+    if (!document.getElementById('toast-container')) {
+        const tc = document.createElement('div');
+        tc.id = 'toast-container';
+        document.body.appendChild(tc);
+    }
+    if (!document.getElementById('global-loading')) {
+        const gl = document.createElement('div');
+        gl.id = 'global-loading';
+        gl.innerHTML = `
+            <div class="d-flex flex-column align-items-center">
+                <div class="spinner-border text-primary" role="status" aria-label="Загрузка..."></div>
+                <div class="mt-2 text-muted">Загрузка...</div>
+            </div>
+        `;
+        document.body.appendChild(gl);
+    }
+}
+
+function setGlobalLoading(isLoading) {
+    const el = document.getElementById('global-loading');
+    if (!el) return;
+    if (isLoading) {
+        _loadingCount++;
+    } else {
+        _loadingCount = Math.max(0, _loadingCount - 1);
+    }
+    el.style.display = _loadingCount > 0 ? 'flex' : 'none';
+}
+
+function showToast({ variant = 'primary', title = 'Сообщение', message = '' }) {
+    ensureUiScaffolding();
+    const container = document.getElementById('toast-container');
+    const id = `toast_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
+    const html = `
+        <div id="${id}" class="toast align-items-center text-bg-${variant} border-0 mb-2" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+                <div class="toast-body">
+                    <strong class="me-2">${escapeHtml(title)}</strong>
+                    <span>${escapeHtml(message)}</span>
+                </div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Закрыть"></button>
+            </div>
+        </div>
+    `;
+    container.insertAdjacentHTML('beforeend', html);
+    const toastEl = document.getElementById(id);
+    const bsToast = new bootstrap.Toast(toastEl, { delay: 3500 });
+    bsToast.show();
+    toastEl.addEventListener('hidden.bs.toast', () => toastEl.remove());
+}
+
+function toastSuccess(message, title = 'Готово') {
+    showToast({ variant: 'success', title, message });
+}
+
+function toastError(message, title = 'Ошибка') {
+    showToast({ variant: 'danger', title, message });
+}
+
+async function apiAction(endpoint, options = {}, { successMessage = null } = {}) {
+    try {
+        setGlobalLoading(true);
+        const data = await apiFetch(endpoint, options);
+        if (successMessage) toastSuccess(successMessage);
+        return data;
+    } catch (e) {
+        toastError(e.message || 'Ошибка запроса');
+        throw e;
+    } finally {
+        setGlobalLoading(false);
+    }
+}
+
 // Получение токена авторизации (Basic Auth)
 function getAuthHeaders() {
     // В реальном приложении здесь должна быть логика получения токена
@@ -31,6 +109,7 @@ async function apiFetch(endpoint, options = {}) {
 
 // Навигация
 document.addEventListener('DOMContentLoaded', () => {
+    ensureUiScaffolding();
     const navItems = document.querySelectorAll('[data-page]');
     navItems.forEach(item => {
         item.addEventListener('click', (e) => {
@@ -72,6 +151,9 @@ async function loadPage(page) {
                 break;
             case 'stats':
                 await loadStats();
+                break;
+            case 'scheduler':
+                await loadScheduler();
                 break;
             default:
                 content.innerHTML = '<div class="alert alert-warning">Страница не найдена</div>';
@@ -175,6 +257,14 @@ async function loadQuiz() {
     const content = document.getElementById('content');
     content.innerHTML = `
         <h2>🎯 Квизы</h2>
+        <div class="card mb-3">
+            <div class="card-body">
+                <div class="input-group">
+                    <span class="input-group-text">🔎</span>
+                    <input type="text" class="form-control" id="quizSearch" placeholder="Поиск по дате или заголовку...">
+                </div>
+            </div>
+        </div>
         <div class="list-group" id="quiz-list">
             ${(quizListData.quizzes || []).map(item => {
                 const date = item.quiz_date;
@@ -182,7 +272,7 @@ async function loadQuiz() {
                 const startsAt = item.starts_at_msk ? `<small class="text-muted">(${escapeHtml(item.starts_at_msk)} МСК)</small>` : '';
                 const isDisabled = disabledSet.has(date);
                 return `
-                    <div class="list-group-item d-flex justify-content-between align-items-center">
+                    <div class="list-group-item d-flex justify-content-between align-items-center" data-quiz-item="1" data-quiz-date="${escapeHtml(date)}" data-quiz-title="${escapeHtml(item.title || '')}">
                         <a href="#" class="flex-grow-1 text-decoration-none quiz-date-link" data-quiz-date="${date}">
                             <div>
                                 <strong>${date}</strong>${title}
@@ -215,6 +305,20 @@ async function loadQuiz() {
                 const quizDate = link.dataset.quizDate;
                 await showQuizDetails(quizDate);
             }
+        });
+    }
+
+    const searchEl = document.getElementById('quizSearch');
+    if (searchEl) {
+        searchEl.addEventListener('input', () => {
+            const q = (searchEl.value || '').trim().toLowerCase();
+            const items = document.querySelectorAll('[data-quiz-item="1"]');
+            items.forEach(it => {
+                const d = (it.getAttribute('data-quiz-date') || '').toLowerCase();
+                const t = (it.getAttribute('data-quiz-title') || '').toLowerCase();
+                const ok = !q || d.includes(q) || t.includes(q);
+                it.style.display = ok ? '' : 'none';
+            });
         });
     }
 }
@@ -279,6 +383,12 @@ async function showQuizDetails(quizDate) {
         content.innerHTML = `
             <h2>🎯 Квиз ${quizDate}${title}</h2>
             <button class="btn btn-secondary mb-3" onclick="loadQuiz()">◀️ Назад к списку</button>
+            <div class="btn-group mb-3" role="group">
+                <button class="btn btn-outline-primary" onclick="editQuizMeta('${quizDate}')">✏️ Мета</button>
+                <button class="btn btn-outline-secondary" onclick="duplicateQuiz('${quizDate}')">📋 Дублировать</button>
+                <button class="btn btn-outline-info" onclick="previewQuiz('${quizDate}')">👀 Превью</button>
+                <button class="btn btn-outline-dark" onclick="rescheduleQuizJobs('${quizDate}')">🔁 Перепланировать</button>
+            </div>
             
             <div class="card mb-3">
                 <div class="card-body">
@@ -314,6 +424,262 @@ function escapeHtml(str) {
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+}
+
+function isoToDatetimeLocalMsk(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const parts = new Intl.DateTimeFormat('ru-RU', {
+        timeZone: 'Europe/Moscow',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23'
+    }).formatToParts(d);
+    const get = (t) => parts.find(p => p.type === t)?.value;
+    const y = get('year');
+    const m = get('month');
+    const day = get('day');
+    const h = get('hour');
+    const min = get('minute');
+    if (!y || !m || !day || !h || !min) return '';
+    return `${y}-${m}-${day}T${h}:${min}`;
+}
+
+function isoToHumanMsk(iso) {
+    if (!iso) return '-';
+    try {
+        return new Date(iso).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+    } catch {
+        return iso;
+    }
+}
+
+async function rescheduleQuizJobs(quizDate) {
+    try {
+        const resp = await apiAction(`/scheduler/quiz/${quizDate}/reschedule`, { method: 'POST' });
+        toastSuccess(resp.rescheduled ? 'Задачи пересозданы' : 'Scheduler не запущен (задачи обновятся при рестарте)');
+    } catch (e) {
+        // toast already
+    }
+}
+
+async function editQuizMeta(quizDate) {
+    try {
+        const meta = await apiFetch(`/quiz/${quizDate}/meta`);
+        const currentTitle = meta.title || '';
+        const currentStartsAtLocal = isoToDatetimeLocalMsk(meta.starts_at);
+
+        const modalHtml = `
+            <div class="modal fade" id="editQuizMetaModal" tabindex="-1">
+                <div class="modal-dialog">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">✏️ Мета квиза ${escapeHtml(quizDate)}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <form id="editQuizMetaForm">
+                                <div class="mb-3">
+                                    <label class="form-label">Дата и время старта (МСК)</label>
+                                    <input type="datetime-local" class="form-control" id="eqmStartsAt" value="${escapeHtml(currentStartsAtLocal)}" required>
+                                    <div class="form-text">Должно оставаться в дате ${escapeHtml(quizDate)}. Для переноса используйте «Дублировать».</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Заголовок</label>
+                                    <input type="text" class="form-control" id="eqmTitle" value="${escapeHtml(currentTitle)}" required>
+                                </div>
+                            </form>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                            <button type="button" class="btn btn-primary" onclick="saveQuizMeta('${quizDate}')">💾 Сохранить</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const existing = document.getElementById('editQuizMetaModal');
+        if (existing) existing.remove();
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const bsModal = new bootstrap.Modal(document.getElementById('editQuizMetaModal'));
+        bsModal.show();
+        document.getElementById('editQuizMetaModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    } catch (e) {
+        toastError(e.message || 'Не удалось загрузить метаданные');
+    }
+}
+
+async function saveQuizMeta(quizDate) {
+    const form = document.getElementById('editQuizMetaForm');
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+    const startsAt = document.getElementById('eqmStartsAt').value;
+    const title = document.getElementById('eqmTitle').value.trim();
+    try {
+        const resp = await apiAction(`/quiz/${quizDate}/meta`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ starts_at_local: startsAt, title })
+        });
+        toastSuccess(resp.scheduled ? 'Мета обновлена, задачи пересозданы' : 'Мета обновлена (scheduler не запущен)');
+        const modal = bootstrap.Modal.getInstance(document.getElementById('editQuizMetaModal'));
+        if (modal) modal.hide();
+        await showQuizDetails(quizDate);
+    } catch (e) {
+        // toast already
+    }
+}
+
+async function duplicateQuiz(quizDate) {
+    try {
+        const meta = await apiFetch(`/quiz/${quizDate}/meta`);
+        const currentTitle = meta.title || '';
+        const defaultTitle = currentTitle ? `${currentTitle} (копия)` : 'Квиз (копия)';
+
+        const modalHtml = `
+            <div class="modal fade" id="duplicateQuizModal" tabindex="-1">
+                <div class="modal-dialog">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">📋 Дублировать квиз ${escapeHtml(quizDate)}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <form id="duplicateQuizForm">
+                                <div class="mb-3">
+                                    <label class="form-label">Новая дата и время (МСК)</label>
+                                    <input type="datetime-local" class="form-control" id="dqStartsAt" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Заголовок</label>
+                                    <input type="text" class="form-control" id="dqTitle" value="${escapeHtml(defaultTitle)}" required>
+                                </div>
+                            </form>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                            <button type="button" class="btn btn-primary" onclick="saveDuplicateQuiz('${quizDate}')">💾 Создать копию</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const existing = document.getElementById('duplicateQuizModal');
+        if (existing) existing.remove();
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const bsModal = new bootstrap.Modal(document.getElementById('duplicateQuizModal'));
+        bsModal.show();
+        document.getElementById('duplicateQuizModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    } catch (e) {
+        toastError(e.message || 'Не удалось открыть форму дублирования');
+    }
+}
+
+async function saveDuplicateQuiz(sourceQuizDate) {
+    const form = document.getElementById('duplicateQuizForm');
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+    const startsAt = document.getElementById('dqStartsAt').value;
+    const title = document.getElementById('dqTitle').value.trim();
+    try {
+        const resp = await apiAction(`/quiz/duplicate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_quiz_date: sourceQuizDate, starts_at_local: startsAt, title })
+        });
+        toastSuccess(`Квиз продублирован на дату ${resp.quiz_date}${resp.scheduled ? ' (задачи обновлены)' : ''}`);
+        const modal = bootstrap.Modal.getInstance(document.getElementById('duplicateQuizModal'));
+        if (modal) modal.hide();
+        await showQuizDetails(resp.quiz_date);
+    } catch (e) {
+        // toast already
+    }
+}
+
+async function previewQuiz(quizDate) {
+    try {
+        const [meta, questions] = await Promise.all([
+            apiFetch(`/quiz/${quizDate}/meta`),
+            apiFetch(`/quiz/${quizDate}/questions`)
+        ]);
+        const title = meta.title ? `<div class="text-muted mb-2">${escapeHtml(meta.title)}</div>` : '';
+        const starts = meta.starts_at ? `<div class="text-muted mb-2">🕒 ${escapeHtml(isoToHumanMsk(meta.starts_at))} (МСК)</div>` : '';
+        const qCount = (questions.questions || []).length;
+        const first = (questions.questions || [])[0];
+
+        let firstHtml = '<div class="text-muted">Нет вопросов</div>';
+        if (first) {
+            const qText = escapeHtml(first.question || first.question_text || '');
+            const opts = first.options || {};
+            const keys = typeof opts === 'object' && !Array.isArray(opts) ? Object.keys(opts) : [];
+            const optsHtml = keys.length
+                ? `<ul class="mb-0">${keys.map(k => `<li>${escapeHtml(k)}. ${escapeHtml(opts[k])}</li>`).join('')}</ul>`
+                : '';
+            firstHtml = `
+                <div class="card">
+                    <div class="card-body">
+                        <div class="fw-bold mb-2">${qText}</div>
+                        ${optsHtml}
+                    </div>
+                </div>
+            `;
+        }
+
+        const modalHtml = `
+            <div class="modal fade" id="previewQuizModal" tabindex="-1">
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">👀 Превью квиза ${escapeHtml(quizDate)}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            ${title}
+                            ${starts}
+                            <div class="mb-3">
+                                <div class="fw-bold">Текст объявления (как увидит пользователь)</div>
+                                <div class="border rounded p-3 bg-light">
+                                    <div class="fw-bold">🎯 Квиз начинается!</div>
+                                    ${meta.title ? `<div class="mt-1">${escapeHtml(meta.title)}</div>` : ''}
+                                    <div class="mt-2">Нажми на кнопку ниже, чтобы принять участие.<br>У тебя есть 6 часов, чтобы начать квиз!</div>
+                                </div>
+                            </div>
+                            <div class="mb-2 fw-bold">Первый вопрос (пример)</div>
+                            ${firstHtml}
+                            <div class="text-muted mt-3">Всего вопросов: ${qCount}</div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const existing = document.getElementById('previewQuizModal');
+        if (existing) existing.remove();
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const bsModal = new bootstrap.Modal(document.getElementById('previewQuizModal'));
+        bsModal.show();
+        document.getElementById('previewQuizModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    } catch (e) {
+        toastError(e.message || 'Не удалось построить превью');
+    }
 }
 
 function showCreateQuizForm() {
@@ -472,23 +838,23 @@ async function submitCreateQuiz() {
     for (let i = 0; i < questions.length; i++) {
         const q = questions[i];
         if (!q.question) {
-            alert(`Вопрос #${i + 1}: пустой текст`);
+            toastError(`Вопрос #${i + 1}: пустой текст`);
             return;
         }
         for (const k of ["1","2","3","4"]) {
             if (!q.options[k]) {
-                alert(`Вопрос #${i + 1}: вариант ${k} обязателен`);
+                toastError(`Вопрос #${i + 1}: вариант ${k} обязателен`);
                 return;
             }
         }
         if (!["1","2","3","4"].includes(q.correct_answer)) {
-            alert(`Вопрос #${i + 1}: выберите правильный ответ`);
+            toastError(`Вопрос #${i + 1}: выберите правильный ответ`);
             return;
         }
     }
 
     try {
-        const resp = await apiFetch('/quiz/create', {
+        const resp = await apiAction('/quiz/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -497,21 +863,20 @@ async function submitCreateQuiz() {
                 questions
             })
         });
-
-        alert(`✅ Квиз создан на дату ${resp.quiz_date}${resp.scheduled ? ' (задачи в планировщике обновлены)' : ''}`);
+        toastSuccess(`Квиз создан на дату ${resp.quiz_date}${resp.scheduled ? ' (задачи обновлены)' : ''}`);
         await loadQuiz();
     } catch (error) {
-        alert('Ошибка: ' + error.message);
+        // toast уже показан в apiAction
     }
 }
 
 async function toggleQuizDate(quizDate) {
     try {
-        const result = await apiFetch(`/quiz/${quizDate}/toggle`, { method: 'POST' });
-        alert(result.message);
+        const result = await apiAction(`/quiz/${quizDate}/toggle`, { method: 'POST' });
+        toastSuccess(result.message || 'Сохранено');
         loadQuiz();
     } catch (error) {
-        alert('Ошибка: ' + error.message);
+        // toast уже показан в apiAction
     }
 }
 
@@ -522,7 +887,7 @@ async function editQuizQuestion(quizDate, questionId) {
         const question = questionsData.questions.find(q => q.id === questionId || q.id === parseInt(questionId));
         
         if (!question) {
-            alert('Вопрос не найден');
+            toastError('Вопрос не найден');
             return;
         }
         
@@ -690,12 +1055,12 @@ async function saveQuizQuestion(quizDate, questionId) {
             // Обновляем отображение квиза
             await showQuizDetails(quizDate);
             
-            alert('✅ Вопрос успешно обновлен!');
+            toastSuccess('Вопрос успешно обновлен!');
         } else {
-            alert('Ошибка: ' + (response.message || 'Не удалось сохранить вопрос'));
+            toastError(response.message || 'Не удалось сохранить вопрос');
         }
     } catch (error) {
-        alert('Ошибка при сохранении: ' + error.message);
+        toastError('Ошибка при сохранении: ' + error.message);
     }
 }
 
@@ -1206,6 +1571,107 @@ async function viewUserTickets(userId) {
         });
     } catch (error) {
         alert('Ошибка: ' + error.message);
+    }
+}
+
+// ----------------- Планировщик (операционка) -----------------
+async function loadScheduler() {
+    const [jobsData, quizList] = await Promise.all([
+        apiFetch('/scheduler/jobs'),
+        apiFetch('/quiz/list').catch(() => ({ quizzes: [] }))
+    ]);
+
+    const quizTitleByDate = new Map((quizList.quizzes || []).map(q => [q.quiz_date, q.title || null]));
+
+    const content = document.getElementById('content');
+    const running = !!jobsData.running;
+
+    const jobs = jobsData.jobs || [];
+    const rows = jobs.map(j => {
+        const id = j.id || '';
+        let kind = 'other';
+        let quizDate = null;
+        let action = null;
+
+        if (id.startsWith('quiz_announcements_')) { kind = 'quiz'; quizDate = id.replace('quiz_announcements_', ''); action = 'announce'; }
+        else if (id.startsWith('quiz_reminders_')) { kind = 'quiz'; quizDate = id.replace('quiz_reminders_', ''); action = 'remind'; }
+        else if (id.startsWith('quiz_mark_')) { kind = 'quiz'; quizDate = id.replace('quiz_mark_', ''); action = 'mark'; }
+
+        const title = quizDate ? (quizTitleByDate.get(quizDate) || '') : '';
+        const nextRun = j.next_run_time ? isoToHumanMsk(j.next_run_time) : '-';
+
+        const actionBtn = (kind === 'quiz' && quizDate && action) ? `
+            <button class="btn btn-sm btn-outline-primary" onclick="runQuizAction('${quizDate}', '${action}')">▶️ Запустить</button>
+        ` : '';
+
+        const rescheduleBtn = (kind === 'quiz' && quizDate) ? `
+            <button class="btn btn-sm btn-outline-dark" onclick="rescheduleQuizJobs('${quizDate}')">🔁 Перепланировать</button>
+        ` : '';
+
+        const openQuizBtn = (kind === 'quiz' && quizDate) ? `
+            <button class="btn btn-sm btn-outline-secondary" onclick="showQuizDetails('${quizDate}')">🎯 Открыть</button>
+        ` : '';
+
+        return `
+            <tr>
+                <td><code>${escapeHtml(id)}</code></td>
+                <td>${escapeHtml(kind)}</td>
+                <td>${quizDate ? `<div><strong>${escapeHtml(quizDate)}</strong>${title ? ` — <span class="text-muted">${escapeHtml(title)}</span>` : ''}</div>` : '-'}</td>
+                <td>${escapeHtml(nextRun)}</td>
+                <td>
+                    <div class="btn-group btn-group-sm" role="group">
+                        ${openQuizBtn}
+                        ${rescheduleBtn}
+                        ${actionBtn}
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+
+    content.innerHTML = `
+        <h2>⏱ Планировщик</h2>
+        <div class="card mb-3">
+            <div class="card-body d-flex justify-content-between align-items-center">
+                <div>
+                    <div><strong>Статус:</strong> ${running ? '<span class="text-success">running</span>' : '<span class="text-danger">stopped</span>'}</div>
+                    <div class="text-muted">Время в таблице: МСК (Europe/Moscow)</div>
+                </div>
+                <div>
+                    <button class="btn btn-outline-primary" onclick="loadScheduler()">🔄 Обновить</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Тип</th>
+                                <th>Квиз</th>
+                                <th>Следующий запуск (МСК)</th>
+                                <th>Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${rows || '<tr><td colspan="5" class="text-muted">Нет задач</td></tr>'}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+async function runQuizAction(quizDate, action) {
+    try {
+        await apiAction(`/scheduler/quiz/${quizDate}/run/${action}`, { method: 'POST' });
+        toastSuccess(`Запущено: ${quizDate} / ${action}`);
+    } catch (e) {
+        // toast already
     }
 }
 
