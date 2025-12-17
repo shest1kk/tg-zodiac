@@ -41,6 +41,120 @@ def set_bot(bot_instance):
 
 logger = logging.getLogger(__name__)
 
+def _quiz_disabled_file() -> Path:
+    # scheduler.py лежит в корне проекта
+    base_dir = Path(__file__).parent
+    return base_dir / "data" / "quiz_disabled_dates.json"
+
+
+def _load_quiz_disabled_dates() -> set[str]:
+    disabled_file = _quiz_disabled_file()
+    try:
+        if disabled_file.exists():
+            with open(disabled_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                dates = data.get("dates", [])
+                if isinstance(dates, list):
+                    return set(str(d).strip() for d in dates if str(d).strip())
+    except Exception as e:
+        logger.warning(f"Не удалось загрузить quiz_disabled_dates.json: {e}")
+    return set()
+
+
+def _is_quiz_disabled(quiz_date: str) -> bool:
+    return quiz_date in _load_quiz_disabled_dates()
+
+
+def _schedule_quiz_jobs_for_date(quiz_date: str):
+    """Планирует объявление/напоминание/отметку для конкретного квиза.
+
+    Время берётся из meta.starts_at в data/quiz.json, иначе из QUIZ_HOUR/QUIZ_MINUTE.
+    """
+    global scheduler
+    if scheduler is None:
+        return
+
+    if _is_quiz_disabled(quiz_date):
+        logger.info(f"⏭️ Квиз для {quiz_date} отключен (quiz_disabled_dates.json), пропускаю планирование")
+        return
+
+    try:
+        from quiz import get_quiz_start_datetime_moscow
+        starts_at_moscow = get_quiz_start_datetime_moscow(quiz_date)
+        if not starts_at_moscow:
+            logger.warning(f"Не удалось получить starts_at для квиза {quiz_date}, пропускаю")
+            return
+
+        now_utc = datetime.now(timezone.utc)
+
+        announcement_datetime = starts_at_moscow.astimezone(timezone.utc)
+        reminder_datetime = (starts_at_moscow + timedelta(hours=QUIZ_REMINDER_DELAY)).astimezone(timezone.utc)
+        mark_datetime = (starts_at_moscow + timedelta(hours=QUIZ_PARTICIPATION_WINDOW)).astimezone(timezone.utc)
+
+        if announcement_datetime > now_utc:
+            scheduler.add_job(
+                send_quiz_announcements_for_date,
+                "date",
+                run_date=announcement_datetime,
+                id=f"quiz_announcements_{quiz_date}",
+                replace_existing=True,
+                args=[quiz_date],
+            )
+            logger.info(
+                f"✅ Задача объявления квиза для {quiz_date} запланирована на "
+                f"{announcement_datetime.strftime('%d.%m.%Y %H:%M')} UTC "
+                f"({starts_at_moscow.strftime('%d.%m.%Y %H:%M')} МСК)"
+            )
+        else:
+            logger.debug(f"⏰ Время объявления квиза для {quiz_date} уже прошло, задача не будет создана")
+
+        if reminder_datetime > now_utc:
+            scheduler.add_job(
+                send_quiz_reminders_for_date,
+                "date",
+                run_date=reminder_datetime,
+                id=f"quiz_reminders_{quiz_date}",
+                replace_existing=True,
+                args=[quiz_date],
+            )
+            logger.info(f"✅ Задача напоминания квиза для {quiz_date} запланирована на {reminder_datetime.strftime('%d.%m.%Y %H:%M')} UTC")
+
+        if mark_datetime > now_utc:
+            scheduler.add_job(
+                mark_quiz_non_participants_for_date,
+                "date",
+                run_date=mark_datetime,
+                id=f"quiz_mark_{quiz_date}",
+                replace_existing=True,
+                args=[quiz_date],
+            )
+            logger.info(f"✅ Задача отметки не принявших участие для {quiz_date} запланирована на {mark_datetime.strftime('%d.%m.%Y %H:%M')} UTC")
+
+    except Exception as e:
+        logger.error(f"Ошибка при планировании задач квиза {quiz_date}: {e}", exc_info=True)
+
+
+def schedule_quiz_jobs_if_running(quiz_date: str) -> bool:
+    """Публичный хук для web-админки: сразу добавить задачи нового квиза без рестарта бота."""
+    global scheduler
+    if scheduler is None or not getattr(scheduler, "running", False):
+        return False
+    _schedule_quiz_jobs_for_date(quiz_date)
+    return True
+
+
+def _schedule_all_quizzes_from_json():
+    """Планирует все квизы, которые есть в data/quiz.json."""
+    try:
+        from quiz import get_all_quiz_dates
+        dates = get_all_quiz_dates()
+        # Сортируем по дате на всякий случай
+        for quiz_date in sorted(dates):
+            _schedule_quiz_jobs_for_date(quiz_date)
+    except Exception as e:
+        logger.error(f"Ошибка при планировании квизов из quiz.json: {e}", exc_info=True)
+
+
 def load_predictions():
     """Загружает данные предсказаний из файла (синхронная версия для обратной совместимости)"""
     predictions_path = Path("data/predictions.json")
@@ -384,100 +498,7 @@ def start_scheduler():
             logger.debug(f"⏰ Время закрытия для {raffle_date_str} уже прошло. Задача не будет создана.")
     
     # Планировщик для квизов: каждый день начиная с 11.12 в 12:00 МСК
-    quiz_time_moscow = dt_time(hour=QUIZ_HOUR, minute=QUIZ_MINUTE)
-    temp_quiz_moscow = datetime.combine(datetime(2025, 1, 1).date(), quiz_time_moscow)
-    temp_quiz_moscow = temp_quiz_moscow.replace(tzinfo=MOSCOW_TZ)
-    temp_quiz_utc = temp_quiz_moscow.astimezone(timezone.utc)
-    quiz_utc_hour = temp_quiz_utc.hour
-    quiz_utc_minute = temp_quiz_utc.minute
-    
-    # Время напоминания (через 3 часа после объявления, в 15:00)
-    reminder_quiz_time_moscow = dt_time(hour=(QUIZ_HOUR + QUIZ_REMINDER_DELAY) % 24, minute=QUIZ_MINUTE)
-    temp_reminder_quiz_moscow = datetime.combine(datetime(2025, 1, 1).date(), reminder_quiz_time_moscow)
-    temp_reminder_quiz_moscow = temp_reminder_quiz_moscow.replace(tzinfo=MOSCOW_TZ)
-    temp_reminder_quiz_utc = temp_reminder_quiz_moscow.astimezone(timezone.utc)
-    reminder_quiz_utc_hour = temp_reminder_quiz_utc.hour
-    reminder_quiz_utc_minute = temp_reminder_quiz_utc.minute
-    
-    # Время отметки не принявших участие (через 6 часов, в 18:00)
-    mark_time_moscow = dt_time(hour=(QUIZ_HOUR + QUIZ_PARTICIPATION_WINDOW) % 24, minute=QUIZ_MINUTE)
-    temp_mark_moscow = datetime.combine(datetime(2025, 1, 1).date(), mark_time_moscow)
-    temp_mark_moscow = temp_mark_moscow.replace(tzinfo=MOSCOW_TZ)
-    temp_mark_utc = temp_mark_moscow.astimezone(timezone.utc)
-    mark_utc_hour = temp_mark_utc.hour
-    mark_utc_minute = temp_mark_utc.minute
-    
-    # Планируем квизы с 11.12 по 16.12 включительно
-    start_date = datetime.strptime(QUIZ_START_DATE, "%Y-%m-%d").date()
-    end_date = datetime.strptime(QUIZ_END_DATE, "%Y-%m-%d").date()
-    now_utc = datetime.now(timezone.utc)
-    
-    # Планируем квизы только для указанного периода
-    current_date = start_date
-    # Даты, когда квизы отключены
-    # Добавляем завтрашнюю дату для гарантии, что квизы не запустятся
-    tomorrow_date = (datetime.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
-    QUIZ_DISABLED_DATES = ["2025-12-15", tomorrow_date]
-    
-    while current_date <= end_date:
-        quiz_date_str = current_date.strftime("%Y-%m-%d")
-        
-        # Пропускаем отключенные даты
-        if quiz_date_str in QUIZ_DISABLED_DATES:
-            logger.info(f"⏭️ Квиз для {quiz_date_str} отключен, пропускаем")
-            current_date += timedelta(days=1)
-            continue
-        
-        # Время объявления (12:00 МСК)
-        announcement_datetime = datetime.combine(current_date, dt_time(hour=quiz_utc_hour, minute=quiz_utc_minute))
-        announcement_datetime = announcement_datetime.replace(tzinfo=timezone.utc)
-        
-        # Время напоминания (15:00 МСК)
-        reminder_datetime = datetime.combine(current_date, dt_time(hour=reminder_quiz_utc_hour, minute=reminder_quiz_utc_minute))
-        reminder_datetime = reminder_datetime.replace(tzinfo=timezone.utc)
-        
-        # Время отметки не принявших участие (18:00 МСК)
-        mark_datetime = datetime.combine(current_date, dt_time(hour=mark_utc_hour, minute=mark_utc_minute))
-        mark_datetime = mark_datetime.replace(tzinfo=timezone.utc)
-        
-        # Планируем объявление
-        if announcement_datetime > now_utc:
-            scheduler.add_job(
-                send_quiz_announcements_for_date,
-                'date',
-                run_date=announcement_datetime,
-                id=f'quiz_announcements_{quiz_date_str}',
-                replace_existing=True,
-                args=[quiz_date_str]
-            )
-            logger.info(f"✅ Задача объявления квиза для {quiz_date_str} запланирована на {announcement_datetime.strftime('%d.%m.%Y %H:%M')} UTC ({QUIZ_HOUR:02d}:{QUIZ_MINUTE:02d} МСК)")
-        
-        # Планируем напоминание
-        if reminder_datetime > now_utc:
-            scheduler.add_job(
-                send_quiz_reminders_for_date,
-                'date',
-                run_date=reminder_datetime,
-                id=f'quiz_reminders_{quiz_date_str}',
-                replace_existing=True,
-                args=[quiz_date_str]
-            )
-            logger.info(f"✅ Задача напоминания квиза для {quiz_date_str} запланирована на {reminder_datetime.strftime('%d.%m.%Y %H:%M')} UTC")
-        
-        # Планируем отметку не принявших участие
-        if mark_datetime > now_utc:
-            scheduler.add_job(
-                mark_quiz_non_participants_for_date,
-                'date',
-                run_date=mark_datetime,
-                id=f'quiz_mark_{quiz_date_str}',
-                replace_existing=True,
-                args=[quiz_date_str]
-            )
-            logger.info(f"✅ Задача отметки не принявших участие для {quiz_date_str} запланирована на {mark_datetime.strftime('%d.%m.%Y %H:%M')} UTC")
-        
-        # Переходим к следующему дню
-        current_date += timedelta(days=1)
+    _schedule_all_quizzes_from_json()
     
     scheduler.start()
     
@@ -490,7 +511,7 @@ def start_scheduler():
         f"   Период: с 01.12.2025 по 31.12.2025 (31 день)\n"
         f"   🎁 Розыгрыши: в {RAFFLE_HOUR:02d}:{RAFFLE_MINUTE:02d} МСК ({raffle_utc_hour:02d}:{raffle_utc_minute:02d} UTC)\n"
         f"   Даты: {raffle_dates_for_log}\n"
-        f"   🎯 Квизы: каждый день в {QUIZ_HOUR:02d}:{QUIZ_MINUTE:02d} МСК ({quiz_utc_hour:02d}:{quiz_utc_minute:02d} UTC) начиная с {QUIZ_START_DATE}"
+        f"   🎯 Квизы: по расписанию из data/quiz.json (включая meta.starts_at)"
     )
 
 async def send_raffle_announcements_for_date(raffle_date: str):
@@ -653,13 +674,8 @@ async def send_raffle_reminders_for_date(raffle_date: str):
 
 async def send_quiz_announcements_for_date(quiz_date: str):
     """Рассылка объявлений о квизе для конкретной даты"""
-    # Проверяем, не отключен ли квиз для этой даты
-    # Добавляем завтрашнюю дату для гарантии
-    from datetime import datetime as dt, timedelta
-    tomorrow_date = (dt.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
-    QUIZ_DISABLED_DATES = ["2025-12-15", tomorrow_date]
-    if quiz_date in QUIZ_DISABLED_DATES:
-        logger.info(f"⏭️ Квиз для {quiz_date} отключен, объявления не отправляются")
+    if _is_quiz_disabled(quiz_date):
+        logger.info(f"⏭️ Квиз для {quiz_date} отключен (quiz_disabled_dates.json), объявления не отправляются")
         return
     
     if bot is None:
@@ -703,13 +719,8 @@ async def send_quiz_announcements_for_date(quiz_date: str):
 
 async def send_quiz_reminders_for_date(quiz_date: str):
     """Отправка напоминаний о квизе для конкретной даты"""
-    # Проверяем, не отключен ли квиз для этой даты
-    # Добавляем завтрашнюю дату для гарантии
-    from datetime import datetime as dt, timedelta
-    tomorrow_date = (dt.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
-    QUIZ_DISABLED_DATES = ["2025-12-15", tomorrow_date]
-    if quiz_date in QUIZ_DISABLED_DATES:
-        logger.info(f"⏭️ Квиз для {quiz_date} отключен, напоминания не отправляются")
+    if _is_quiz_disabled(quiz_date):
+        logger.info(f"⏭️ Квиз для {quiz_date} отключен (quiz_disabled_dates.json), напоминания не отправляются")
         return
     
     if bot is None:
@@ -753,13 +764,8 @@ async def send_quiz_reminders_for_date(quiz_date: str):
 
 async def mark_quiz_non_participants_for_date(quiz_date: str):
     """Отмечает пользователей, которые не приняли участие в квизе"""
-    # Проверяем, не отключен ли квиз для этой даты
-    # Добавляем завтрашнюю дату для гарантии
-    from datetime import datetime as dt, timedelta
-    tomorrow_date = (dt.now(MOSCOW_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
-    QUIZ_DISABLED_DATES = ["2025-12-15", tomorrow_date]
-    if quiz_date in QUIZ_DISABLED_DATES:
-        logger.info(f"⏭️ Квиз для {quiz_date} отключен, отметка не принимавших участие не выполняется")
+    if _is_quiz_disabled(quiz_date):
+        logger.info(f"⏭️ Квиз для {quiz_date} отключен (quiz_disabled_dates.json), отметка не принимавших участие не выполняется")
         return
     
     if bot is None:

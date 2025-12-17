@@ -165,8 +165,8 @@ async function loadDashboard() {
 
 // Квизы
 async function loadQuiz() {
-    const [dates, disabledDates] = await Promise.all([
-        apiFetch('/quiz/dates'),
+    const [quizList, disabledDates] = await Promise.all([
+        apiFetch('/quiz/list'),
         apiFetch('/quiz/disabled-dates')
     ]);
     
@@ -176,12 +176,19 @@ async function loadQuiz() {
     content.innerHTML = `
         <h2>🎯 Квизы</h2>
         <div class="list-group" id="quiz-list">
-            ${dates.dates.map(date => {
+            ${(quizList.quizzes || []).map(item => {
+                const date = item.quiz_date;
+                const title = item.title ? ` — <span class="text-muted">${escapeHtml(item.title)}</span>` : '';
+                const startsAt = item.starts_at_msk ? `<small class="text-muted">(${escapeHtml(item.starts_at_msk)} МСК)</small>` : '';
                 const isDisabled = disabledSet.has(date);
                 return `
                     <div class="list-group-item d-flex justify-content-between align-items-center">
                         <a href="#" class="flex-grow-1 text-decoration-none quiz-date-link" data-quiz-date="${date}">
-                            ${date} ${isDisabled ? '<span class="badge bg-danger">Отключен</span>' : ''}
+                            <div>
+                                <strong>${date}</strong>${title}
+                                ${isDisabled ? '<span class="badge bg-danger ms-2">Отключен</span>' : ''}
+                            </div>
+                            <div>${startsAt}</div>
                         </a>
                         <div>
                             <button class="btn btn-sm ${isDisabled ? 'btn-success' : 'btn-warning'}" onclick="event.stopPropagation(); toggleQuizDate('${date}'); return false;">
@@ -191,6 +198,9 @@ async function loadQuiz() {
                     </div>
                 `;
             }).join('')}
+        </div>
+        <div class="mt-3">
+            <button class="btn btn-success" onclick="showCreateQuizForm()">➕ Добавить квиз</button>
         </div>
     `;
     
@@ -211,12 +221,15 @@ async function loadQuiz() {
 
 async function showQuizDetails(quizDate) {
     try {
-        const [stats, questions] = await Promise.all([
+        const [meta, stats, questions] = await Promise.all([
+            apiFetch(`/quiz/${quizDate}/meta`),
             apiFetch(`/quiz/${quizDate}/stats`),
             apiFetch(`/quiz/${quizDate}/questions`)
         ]);
         
         const content = document.getElementById('content');
+        const title = meta.title ? ` — ${escapeHtml(meta.title)}` : '';
+        const startsAt = meta.starts_at_msk ? `<p class="text-muted mb-1">🕒 Начало: <strong>${escapeHtml(meta.starts_at_msk)}</strong> МСК</p>` : '';
         
         let questionsHtml = '<p>Вопросы не найдены</p>';
         if (questions.questions && questions.questions.length > 0) {
@@ -264,12 +277,13 @@ async function showQuizDetails(quizDate) {
         }
         
         content.innerHTML = `
-            <h2>🎯 Квиз ${quizDate}</h2>
+            <h2>🎯 Квиз ${quizDate}${title}</h2>
             <button class="btn btn-secondary mb-3" onclick="loadQuiz()">◀️ Назад к списку</button>
             
             <div class="card mb-3">
                 <div class="card-body">
                     <h5>Статистика</h5>
+                    ${startsAt}
                     <p>Всего участников: ${stats.total_participants || 0}</p>
                     <p>Получили билетик: ${stats.with_tickets || 0}</p>
                     <p>Не получили билетик: ${stats.no_tickets || 0}</p>
@@ -289,6 +303,205 @@ async function showQuizDetails(quizDate) {
                 Ошибка при загрузке данных: ${error.message}
             </div>
         `;
+    }
+}
+
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+function showCreateQuizForm() {
+    const content = document.getElementById('content');
+    content.innerHTML = `
+        <h2>➕ Добавить квиз</h2>
+        <button class="btn btn-secondary mb-3" onclick="loadQuiz()">◀️ Назад к списку</button>
+
+        <div class="card">
+            <div class="card-body">
+                <form id="createQuizForm">
+                    <div class="mb-3">
+                        <label class="form-label">Дата и время квиза (МСК)</label>
+                        <input type="datetime-local" class="form-control" id="cqStartsAt" required>
+                        <div class="form-text">Ввод интерпретируется как московское время.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Заголовок квиза</label>
+                        <input type="text" class="form-control" id="cqTitle" required>
+                    </div>
+
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h5 class="mb-0">Вопросы</h5>
+                        <button type="button" class="btn btn-outline-primary btn-sm" onclick="addCreateQuizQuestion()">➕ Добавить вопрос</button>
+                    </div>
+
+                    <div id="cqQuestions"></div>
+
+                    <div class="mt-3">
+                        <button type="submit" class="btn btn-success">💾 Создать квиз</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+
+    // Стартуем минимум с 1 вопроса
+    window._cqCounter = 0;
+    addCreateQuizQuestion();
+
+    const form = document.getElementById('createQuizForm');
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        await submitCreateQuiz();
+    });
+}
+
+function addCreateQuizQuestion() {
+    const container = document.getElementById('cqQuestions');
+    if (!container) return;
+    const id = (++window._cqCounter);
+    const block = document.createElement('div');
+    block.className = 'card mb-3';
+    block.setAttribute('data-cq-id', String(id));
+    block.innerHTML = `
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center">
+                <h6 class="mb-2">Вопрос #${id}</h6>
+                <button type="button" class="btn btn-outline-danger btn-sm" onclick="removeCreateQuizQuestion(${id})">🗑 Удалить</button>
+            </div>
+            <div class="mb-2">
+                <label class="form-label">Текст вопроса</label>
+                <textarea class="form-control" id="cqQ_${id}" rows="2" required></textarea>
+            </div>
+            <div class="mb-2">
+                <label class="form-label">Варианты ответов (1-4)</label>
+                <div class="input-group mb-2">
+                    <span class="input-group-text">1</span>
+                    <input type="text" class="form-control" id="cqO_${id}_1" required>
+                </div>
+                <div class="input-group mb-2">
+                    <span class="input-group-text">2</span>
+                    <input type="text" class="form-control" id="cqO_${id}_2" required>
+                </div>
+                <div class="input-group mb-2">
+                    <span class="input-group-text">3</span>
+                    <input type="text" class="form-control" id="cqO_${id}_3" required>
+                </div>
+                <div class="input-group mb-2">
+                    <span class="input-group-text">4</span>
+                    <input type="text" class="form-control" id="cqO_${id}_4" required>
+                </div>
+            </div>
+            <div class="mb-2">
+                <label class="form-label">Правильный ответ</label>
+                <select class="form-select" id="cqC_${id}" required>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                </select>
+            </div>
+        </div>
+    `;
+    container.appendChild(block);
+    _ensureCreateQuizRemoveButtons();
+}
+
+function removeCreateQuizQuestion(id) {
+    const container = document.getElementById('cqQuestions');
+    if (!container) return;
+    const blocks = container.querySelectorAll('[data-cq-id]');
+    if (blocks.length <= 1) {
+        alert('Должен быть минимум 1 вопрос');
+        return;
+    }
+    const el = container.querySelector(`[data-cq-id="${id}"]`);
+    if (el) el.remove();
+    _ensureCreateQuizRemoveButtons();
+}
+
+function _ensureCreateQuizRemoveButtons() {
+    const container = document.getElementById('cqQuestions');
+    if (!container) return;
+    const blocks = container.querySelectorAll('[data-cq-id]');
+    const disableRemove = blocks.length <= 1;
+    blocks.forEach(b => {
+        const btn = b.querySelector('button.btn-outline-danger');
+        if (btn) btn.disabled = disableRemove;
+    });
+}
+
+async function submitCreateQuiz() {
+    const startsAt = document.getElementById('cqStartsAt').value;
+    const title = document.getElementById('cqTitle').value.trim();
+    if (!startsAt) {
+        alert('Выберите дату и время квиза');
+        return;
+    }
+    if (!title) {
+        alert('Введите заголовок квиза');
+        return;
+    }
+
+    const container = document.getElementById('cqQuestions');
+    const blocks = Array.from(container.querySelectorAll('[data-cq-id]'));
+    if (blocks.length < 1) {
+        alert('Добавьте минимум 1 вопрос');
+        return;
+    }
+
+    const questions = blocks.map((b) => {
+        const id = b.getAttribute('data-cq-id');
+        const question = document.getElementById(`cqQ_${id}`).value.trim();
+        const options = {
+            "1": document.getElementById(`cqO_${id}_1`).value.trim(),
+            "2": document.getElementById(`cqO_${id}_2`).value.trim(),
+            "3": document.getElementById(`cqO_${id}_3`).value.trim(),
+            "4": document.getElementById(`cqO_${id}_4`).value.trim()
+        };
+        const correct_answer = document.getElementById(`cqC_${id}`).value;
+        return { question, options, correct_answer };
+    });
+
+    // Простая валидация
+    for (let i = 0; i < questions.length; i++) {
+        const q = questions[i];
+        if (!q.question) {
+            alert(`Вопрос #${i + 1}: пустой текст`);
+            return;
+        }
+        for (const k of ["1","2","3","4"]) {
+            if (!q.options[k]) {
+                alert(`Вопрос #${i + 1}: вариант ${k} обязателен`);
+                return;
+            }
+        }
+        if (!["1","2","3","4"].includes(q.correct_answer)) {
+            alert(`Вопрос #${i + 1}: выберите правильный ответ`);
+            return;
+        }
+    }
+
+    try {
+        const resp = await apiFetch('/quiz/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                starts_at_local: startsAt,
+                title,
+                questions
+            })
+        });
+
+        alert(`✅ Квиз создан на дату ${resp.quiz_date}${resp.scheduled ? ' (задачи в планировщике обновлены)' : ''}`);
+        await loadQuiz();
+    } catch (error) {
+        alert('Ошибка: ' + error.message);
     }
 }
 

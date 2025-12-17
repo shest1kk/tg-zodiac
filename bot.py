@@ -2691,23 +2691,19 @@ async def choose_zodiac(cb: types.CallbackQuery):
                 
                 if should_check_quiz:
                     try:
-                        from quiz import QUIZ_HOUR, QUIZ_MINUTE, QUIZ_PARTICIPATION_WINDOW, QUIZ_START_DATE, QUIZ_END_DATE
-                        from quiz import send_quiz_announcement, get_quiz
-                        from datetime import time as dt_time
+                        from quiz import QUIZ_PARTICIPATION_WINDOW, send_quiz_announcement, get_quiz, load_quiz, get_quiz_start_datetime_moscow
                         
                         # Получаем текущую дату в МСК
                         moscow_tz = timezone(timedelta(hours=3))
                         current_time_moscow = datetime.now(moscow_tz)
                         current_date_str = current_time_moscow.strftime("%Y-%m-%d")
                         
-                        # Проверяем, входит ли текущая дата в диапазон квизов
-                        if QUIZ_START_DATE <= current_date_str <= QUIZ_END_DATE:
-                            # Вычисляем время начала и окончания квиза
-                            quiz_start_time = datetime.combine(
-                                current_time_moscow.date(),
-                                dt_time(hour=QUIZ_HOUR, minute=QUIZ_MINUTE)
-                            ).replace(tzinfo=moscow_tz)
-                            
+                        # Квиз должен существовать в data/quiz.json на текущую дату
+                        if load_quiz(current_date_str):
+                            quiz_start_time = get_quiz_start_datetime_moscow(current_date_str)
+                            if not quiz_start_time:
+                                return
+
                             quiz_end_time = quiz_start_time + timedelta(hours=QUIZ_PARTICIPATION_WINDOW)
                             
                             logger.debug(

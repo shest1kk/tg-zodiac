@@ -29,6 +29,9 @@ QUIZ_END_DATE = "2025-12-16"  # Последняя дата квиза (вклю
 QUIZ_MIN_CORRECT_ANSWERS = 3  # Минимальное количество правильных ответов для получения билетика
 TICKET_START_NUMBER = 100  # Начальный номер билетика (первый получит 101)
 
+# Путь к файлу с квизами
+QUIZ_JSON_PATH = Path("data/quiz.json")
+
 # Словарь для хранения задач таймаута: {user_id: task}
 quiz_timeout_tasks = {}
 
@@ -38,7 +41,7 @@ _ticket_number_lock = asyncio.Lock()
 
 def load_quiz(quiz_date: str) -> Optional[Dict]:
     """Загружает квиз для указанной даты из quiz.json"""
-    quiz_path = Path("data/quiz.json")
+    quiz_path = QUIZ_JSON_PATH
     if not quiz_path.exists():
         logger.error("Файл quiz.json не найден!")
         return None
@@ -53,6 +56,11 @@ def load_quiz(quiz_date: str) -> Optional[Dict]:
         if not quiz_data:
             logger.warning(f"Квиз для даты {quiz_date} не найден в quiz.json")
             return None
+
+        # Поддержка нового формата:
+        # quiz_dates[date] = { "meta": {...}, "questions": {...} }
+        if isinstance(quiz_data, dict) and "questions" in quiz_data:
+            quiz_data = quiz_data.get("questions") or {}
         
         return quiz_data
     except (json.JSONDecodeError, IOError) as e:
@@ -81,7 +89,7 @@ def get_total_questions(quiz_date: str) -> int:
 
 def load_all_quiz_data() -> Optional[Dict]:
     """Загружает все данные квизов из quiz.json"""
-    quiz_path = Path("data/quiz.json")
+    quiz_path = QUIZ_JSON_PATH
     if not quiz_path.exists():
         logger.error("Файл quiz.json не найден!")
         return None
@@ -136,15 +144,69 @@ def save_quiz_data(quiz_data: Dict) -> bool:
     Returns:
         True если успешно, False в противном случае
     """
-    quiz_path = Path("data/quiz.json")
+    quiz_path = QUIZ_JSON_PATH
     try:
         with open(quiz_path, "w", encoding="utf-8") as f:
             json.dump(quiz_data, f, ensure_ascii=False, indent=4)
         logger.info(f"Квизы успешно сохранены в {quiz_path}")
         return True
-    except (IOError, json.JSONEncodeError) as e:
+    except (IOError, TypeError) as e:
         logger.error(f"Ошибка при сохранении квизов: {e}")
         return False
+
+
+def get_quiz_meta(quiz_date: str) -> Dict:
+    """Возвращает метаданные квиза для даты (title, starts_at и т.д.).
+
+    Поддерживает оба формата:
+    - старый: quiz_dates[date] = { "1": {...}, ... }
+    - новый:  quiz_dates[date] = { "meta": {...}, "questions": {...} }
+    """
+    all_data = load_all_quiz_data()
+    if not all_data or "quiz_dates" not in all_data:
+        return {}
+
+    date_entry = all_data["quiz_dates"].get(quiz_date)
+    if not isinstance(date_entry, dict):
+        return {}
+
+    if "meta" in date_entry and isinstance(date_entry.get("meta"), dict):
+        return date_entry.get("meta") or {}
+    return {}
+
+
+def get_quiz_title(quiz_date: str) -> Optional[str]:
+    meta = get_quiz_meta(quiz_date)
+    title = meta.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return None
+
+
+def get_quiz_start_datetime_moscow(quiz_date: str) -> Optional[datetime]:
+    """Возвращает datetime начала квиза в МСК (timezone-aware).
+
+    - Если в meta есть starts_at (ISO), используем его.
+    - Иначе — комбинируем quiz_date + QUIZ_HOUR/QUIZ_MINUTE.
+    """
+    # starts_at в ISO, например: 2025-12-17T12:00:00+03:00
+    meta = get_quiz_meta(quiz_date)
+    starts_at = meta.get("starts_at")
+    if isinstance(starts_at, str) and starts_at.strip():
+        try:
+            dt = datetime.fromisoformat(starts_at.strip())
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=MOSCOW_TZ)
+            return dt.astimezone(MOSCOW_TZ)
+        except Exception:
+            logger.warning(f"Не удалось распарсить meta.starts_at для {quiz_date}: {starts_at}")
+
+    try:
+        date_obj = datetime.strptime(quiz_date, "%Y-%m-%d").date()
+        dt = datetime.combine(date_obj, dt_time(hour=QUIZ_HOUR, minute=QUIZ_MINUTE))
+        return dt.replace(tzinfo=MOSCOW_TZ)
+    except Exception:
+        return None
 
 
 def update_quiz_question(question_id: int, quiz_date: str, question_text: str, options: Dict[str, str], correct_answer: str) -> bool:
@@ -168,10 +230,20 @@ def update_quiz_question(question_id: int, quiz_date: str, question_text: str, o
     if quiz_date not in quiz_dates:
         return False
     
-    questions = quiz_dates[quiz_date]
+    date_entry = quiz_dates[quiz_date]
+    # Новый формат: {meta, questions}
+    if isinstance(date_entry, dict) and "questions" in date_entry:
+        questions = date_entry.get("questions") or {}
+    else:
+        questions = date_entry
+
+    if not isinstance(questions, dict):
+        return False
     # Ищем вопрос по ID или по ключу
     question_found = False
     for question_key, question in questions.items():
+        if not isinstance(question, dict):
+            continue
         # Проверяем по ID (может быть число или строка)
         question_id_in_data = question.get("id")
         if (question_id_in_data == question_id or 
