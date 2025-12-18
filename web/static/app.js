@@ -284,6 +284,9 @@ async function loadQuiz() {
                             <button class="btn btn-sm ${isDisabled ? 'btn-success' : 'btn-warning'}" onclick="event.stopPropagation(); toggleQuizDate('${date}'); return false;">
                                 ${isDisabled ? '✅ Включить' : '⏸️ Отключить'}
                             </button>
+                            <button class="btn btn-sm btn-danger ms-1" onclick="event.stopPropagation(); deleteQuiz('${date}'); return false;">
+                                🗑 Удалить
+                            </button>
                         </div>
                     </div>
                 `;
@@ -370,9 +373,16 @@ async function showQuizDetails(quizDate) {
                 return `
                     <div class="card mb-2">
                         <div class="card-body">
-                            <h6>Вопрос #${questionId}</h6>
-                            <p><strong>${questionText}</strong></p>
-                            ${optionsHtml}
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div class="flex-grow-1">
+                                    <h6>Вопрос #${questionId}</h6>
+                                    <p><strong>${questionText}</strong></p>
+                                    ${optionsHtml}
+                                </div>
+                                <div>
+                                    <button class="btn btn-sm btn-danger" onclick="removeQuizQuestion('${quizDate}', ${questionId})">🗑 Удалить</button>
+                                </div>
+                            </div>
                             <button class="btn btn-sm btn-primary mt-2" onclick="editQuizQuestion('${quizDate}', ${questionId})">✏️ Редактировать</button>
                         </div>
                     </div>
@@ -401,7 +411,10 @@ async function showQuizDetails(quizDate) {
                 </div>
             </div>
             
-            <h5>Вопросы</h5>
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h5>Вопросы</h5>
+                <button class="btn btn-outline-primary btn-sm" onclick="showAddQuizQuestionForm('${quizDate}')">➕ Добавить вопрос</button>
+            </div>
             ${questionsHtml}
         `;
     } catch (error) {
@@ -529,7 +542,7 @@ async function saveQuizMeta(quizDate) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ starts_at_local: startsAt, title })
         });
-        toastSuccess(resp.scheduled ? 'Мета обновлена, задачи пересозданы' : 'Мета обновлена (scheduler не запущен)');
+        toastSuccess(resp.scheduled ? 'Мета обновлена, scheduler автоматически обновлен' : 'Мета обновлена (scheduler не запущен)');
         const modal = bootstrap.Modal.getInstance(document.getElementById('editQuizMetaModal'));
         if (modal) modal.hide();
         await showQuizDetails(quizDate);
@@ -880,6 +893,19 @@ async function toggleQuizDate(quizDate) {
     }
 }
 
+async function deleteQuiz(quizDate) {
+    if (!confirm(`Удалить квиз ${quizDate}? Это действие нельзя отменить.`)) {
+        return;
+    }
+    try {
+        await apiAction(`/quiz/${quizDate}`, { method: 'DELETE' });
+        toastSuccess('Квиз удален');
+        loadQuiz();
+    } catch (e) {
+        // toast already
+    }
+}
+
 async function editQuizQuestion(quizDate, questionId) {
     try {
         // Получаем данные вопроса
@@ -1033,7 +1059,7 @@ async function saveQuizQuestion(quizDate, questionId) {
         }
         
         // Отправляем данные на сервер
-        const response = await apiFetch(`/quiz/${quizDate}/questions/${questionId}`, {
+        const response = await apiAction(`/quiz/${quizDate}/questions/${questionId}`, {
             method: 'PUT',
             headers: {
                 'Content-Type': 'application/json'
@@ -1055,7 +1081,7 @@ async function saveQuizQuestion(quizDate, questionId) {
             // Обновляем отображение квиза
             await showQuizDetails(quizDate);
             
-            toastSuccess('Вопрос успешно обновлен!');
+            toastSuccess(response.scheduled ? 'Вопрос обновлен, scheduler обновлен' : 'Вопрос обновлен');
         } else {
             toastError(response.message || 'Не удалось сохранить вопрос');
         }
@@ -1064,114 +1090,707 @@ async function saveQuizQuestion(quizDate, questionId) {
     }
 }
 
+async function removeQuizQuestion(quizDate, questionId) {
+    if (!confirm(`Удалить вопрос #${questionId}?`)) {
+        return;
+    }
+    try {
+        const response = await apiAction(`/quiz/${quizDate}/questions/${questionId}`, { method: 'DELETE' });
+        toastSuccess(response.scheduled ? 'Вопрос удален, scheduler обновлен' : 'Вопрос удален');
+        await showQuizDetails(quizDate);
+    } catch (e) {
+        // toast already
+    }
+}
+
+function showAddQuizQuestionForm(quizDate) {
+    const modalHtml = `
+        <div class="modal fade" id="addQuizQuestionModal" tabindex="-1">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">➕ Добавить вопрос</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <form id="addQuizQuestionForm">
+                            <div class="mb-3">
+                                <label class="form-label">ID вопроса</label>
+                                <input type="number" class="form-control" id="aqqId" required>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Текст вопроса</label>
+                                <textarea class="form-control" id="aqqText" rows="3" required></textarea>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Варианты ответов</label>
+                                <div class="input-group mb-2">
+                                    <span class="input-group-text">1</span>
+                                    <input type="text" class="form-control" id="aqqO1" required>
+                                </div>
+                                <div class="input-group mb-2">
+                                    <span class="input-group-text">2</span>
+                                    <input type="text" class="form-control" id="aqqO2" required>
+                                </div>
+                                <div class="input-group mb-2">
+                                    <span class="input-group-text">3</span>
+                                    <input type="text" class="form-control" id="aqqO3" required>
+                                </div>
+                                <div class="input-group mb-2">
+                                    <span class="input-group-text">4</span>
+                                    <input type="text" class="form-control" id="aqqO4" required>
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Правильный ответ</label>
+                                <select class="form-select" id="aqqCorrect" required>
+                                    <option value="1">1</option>
+                                    <option value="2">2</option>
+                                    <option value="3">3</option>
+                                    <option value="4">4</option>
+                                </select>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                        <button type="button" class="btn btn-primary" onclick="saveAddQuizQuestion('${quizDate}')">💾 Добавить</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    const existing = document.getElementById('addQuizQuestionModal');
+    if (existing) existing.remove();
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    const bsModal = new bootstrap.Modal(document.getElementById('addQuizQuestionModal'));
+    bsModal.show();
+    document.getElementById('addQuizQuestionModal').addEventListener('hidden.bs.modal', function() {
+        this.remove();
+    });
+}
+
+async function saveAddQuizQuestion(quizDate) {
+    const form = document.getElementById('addQuizQuestionForm');
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+    const questionId = parseInt(document.getElementById('aqqId').value);
+    const questionText = document.getElementById('aqqText').value.trim();
+    const options = {
+        "1": document.getElementById('aqqO1').value.trim(),
+        "2": document.getElementById('aqqO2').value.trim(),
+        "3": document.getElementById('aqqO3').value.trim(),
+        "4": document.getElementById('aqqO4').value.trim()
+    };
+    const correctAnswer = document.getElementById('aqqCorrect').value;
+    
+    try {
+        const response = await apiAction(`/quiz/${quizDate}/questions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                question_id: questionId,
+                question_text: questionText,
+                options: options,
+                correct_answer: correctAnswer
+            })
+        });
+        const modal = bootstrap.Modal.getInstance(document.getElementById('addQuizQuestionModal'));
+        if (modal) modal.hide();
+        toastSuccess(response.scheduled ? 'Вопрос добавлен, scheduler обновлен' : 'Вопрос добавлен');
+        await showQuizDetails(quizDate);
+    } catch (e) {
+        // toast already
+    }
+}
+
 // Розыгрыши
 async function loadRaffle() {
-    const dates = await apiFetch('/raffle/dates');
+    const [raffleListData, disabledDates] = await Promise.all([
+        apiFetch('/raffle/list'),
+        apiFetch('/raffle/disabled-dates')
+    ]);
+    
+    const disabledSet = new Set(disabledDates.disabled_dates || []);
     
     const content = document.getElementById('content');
     content.innerHTML = `
         <h2>🎁 Розыгрыши</h2>
-        <div class="list-group">
-            ${dates.dates.map(date => `
-                <a href="#" class="list-group-item list-group-item-action" data-raffle-date="${date}">
-                    ${date}
-                </a>
-            `).join('')}
+        <div class="card mb-3">
+            <div class="card-body">
+                <div class="input-group">
+                    <span class="input-group-text">🔎</span>
+                    <input type="text" class="form-control" id="raffleSearch" placeholder="Поиск по дате или заголовку...">
+                </div>
+            </div>
+        </div>
+        <div class="list-group" id="raffle-list">
+            ${(raffleListData.raffles || []).map(item => {
+                const date = item.raffle_date;
+                const title = item.title ? ` — <span class="text-muted">${escapeHtml(item.title)}</span>` : '';
+                const startsAt = item.starts_at_msk ? `<small class="text-muted">(${escapeHtml(item.starts_at_msk)} МСК)</small>` : '';
+                const isDisabled = disabledSet.has(date);
+                return `
+                    <div class="list-group-item d-flex justify-content-between align-items-center" data-raffle-item="1" data-raffle-date="${escapeHtml(date)}" data-raffle-title="${escapeHtml(item.title || '')}">
+                        <a href="#" class="flex-grow-1 text-decoration-none raffle-date-link" data-raffle-date="${date}">
+                            <div>
+                                <strong>${date}</strong>${title}
+                                ${isDisabled ? '<span class="badge bg-danger ms-2">Отключен</span>' : ''}
+                            </div>
+                            <div>${startsAt}</div>
+                        </a>
+                        <div>
+                            <button class="btn btn-sm ${isDisabled ? 'btn-success' : 'btn-warning'}" onclick="event.stopPropagation(); toggleRaffleDate('${date}'); return false;">
+                                ${isDisabled ? '✅ Включить' : '⏸️ Отключить'}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('')}
+        </div>
+        <div class="mt-3">
+            <button class="btn btn-success" onclick="showCreateRaffleForm()">➕ Добавить розыгрыш</button>
         </div>
     `;
     
-    // Обработчики для дат розыгрышей
-    document.querySelectorAll('[data-raffle-date]').forEach(item => {
-        item.addEventListener('click', async (e) => {
-            e.preventDefault();
-            const raffleDate = item.dataset.raffleDate;
-            await showRaffleDetails(raffleDate);
+    // Обработчики для дат розыгрышей (используем делегирование событий)
+    const raffleListEl = document.getElementById('raffle-list');
+    if (raffleListEl) {
+        raffleListEl.addEventListener('click', async (e) => {
+            const link = e.target.closest('.raffle-date-link');
+            if (link) {
+                e.preventDefault();
+                e.stopPropagation();
+                const raffleDate = link.dataset.raffleDate;
+                await showRaffleDetails(raffleDate);
+            }
         });
-    });
+    }
+
+    const searchEl = document.getElementById('raffleSearch');
+    if (searchEl) {
+        searchEl.addEventListener('input', () => {
+            const q = (searchEl.value || '').trim().toLowerCase();
+            const items = document.querySelectorAll('[data-raffle-item="1"]');
+            items.forEach(it => {
+                const d = (it.getAttribute('data-raffle-date') || '').toLowerCase();
+                const t = (it.getAttribute('data-raffle-title') || '').toLowerCase();
+                const ok = !q || d.includes(q) || t.includes(q);
+                it.style.display = ok ? '' : 'none';
+            });
+        });
+    }
 }
 
 async function showRaffleDetails(raffleDate) {
-    const [stats, unchecked, questions] = await Promise.all([
-        apiFetch(`/raffle/${raffleDate}/stats`),
-        apiFetch(`/raffle/${raffleDate}/unchecked`),
-        apiFetch(`/raffle/${raffleDate}/questions`)
-    ]);
-    
-    const content = document.getElementById('content');
-    
-    let uncheckedHtml = '';
-    if (unchecked.unchecked.length > 0) {
-        uncheckedHtml = `
-            <h5 class="mt-4">Непроверенные ответы (${unchecked.total})</h5>
-            <div class="table-responsive">
-                <table class="table table-sm">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Вопрос</th>
-                            <th>Ответ</th>
-                            <th>Действия</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${unchecked.unchecked.map(u => `
+    try {
+        const [meta, stats, unchecked, questions] = await Promise.all([
+            apiFetch(`/raffle/${raffleDate}/meta`),
+            apiFetch(`/raffle/${raffleDate}/stats`),
+            apiFetch(`/raffle/${raffleDate}/unchecked`),
+            apiFetch(`/raffle/${raffleDate}/questions`)
+        ]);
+        
+        const content = document.getElementById('content');
+        const title = meta.title ? ` — ${escapeHtml(meta.title)}` : '';
+        const startsAt = meta.starts_at_msk ? `<p class="text-muted mb-1">🕒 Начало: <strong>${escapeHtml(meta.starts_at_msk)}</strong> МСК</p>` : '';
+        
+        let uncheckedHtml = '';
+        if (unchecked.unchecked.length > 0) {
+            uncheckedHtml = `
+                <h5 class="mt-4">Непроверенные ответы (${unchecked.total})</h5>
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
                             <tr>
-                                <td>${u.user_id}</td>
-                                <td>${u.question_text ? u.question_text.substring(0, 50) + '...' : '-'}</td>
-                                <td>${u.answer}</td>
-                                <td>
-                                    <button class="btn btn-sm btn-success" onclick="approveAnswer('${raffleDate}', ${u.user_id})">✅</button>
-                                    <button class="btn btn-sm btn-danger" onclick="denyAnswer('${raffleDate}', ${u.user_id})">❌</button>
-                                </td>
+                                <th>ID</th>
+                                <th>Вопрос</th>
+                                <th>Ответ</th>
+                                <th>Действия</th>
                             </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
+                        </thead>
+                        <tbody>
+                            ${unchecked.unchecked.map(u => `
+                                <tr>
+                                    <td>${u.user_id}</td>
+                                    <td>${u.question_text ? u.question_text.substring(0, 50) + '...' : '-'}</td>
+                                    <td>${u.answer}</td>
+                                    <td>
+                                        <button class="btn btn-sm btn-success" onclick="approveAnswer('${raffleDate}', ${u.user_id})">✅</button>
+                                        <button class="btn btn-sm btn-danger" onclick="denyAnswer('${raffleDate}', ${u.user_id})">❌</button>
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        }
+        
+        const questionsHtml = questions.questions ? questions.questions.map((q, idx) => {
+            const questionId = q.id || (idx + 1);
+            const questionTitle = q.title || 'Без названия';
+            const questionText = q.text || q.question_text || 'Нет текста';
+            return `
+                <div class="card mb-2">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div class="flex-grow-1">
+                                <h6>Вопрос #${questionId}: ${escapeHtml(questionTitle)}</h6>
+                                <p><strong>${escapeHtml(questionText)}</strong></p>
+                            </div>
+                            <div>
+                                <button class="btn btn-sm btn-danger" onclick="removeRaffleQuestion('${raffleDate}', ${questionId})">🗑 Удалить</button>
+                            </div>
+                        </div>
+                        <button class="btn btn-sm btn-primary mt-2" onclick="editRaffleQuestion('${raffleDate}', ${questionId})">✏️ Редактировать</button>
+                    </div>
+                </div>
+            `;
+        }).join('') : '<p>Вопросы не найдены</p>';
+        
+        content.innerHTML = `
+            <h2>🎁 Розыгрыш ${raffleDate}${title}</h2>
+            <button class="btn btn-secondary mb-3" onclick="loadRaffle()">◀️ Назад к списку</button>
+            <div class="btn-group mb-3" role="group">
+                <button class="btn btn-outline-primary" onclick="editRaffleMeta('${raffleDate}')">✏️ Мета</button>
+                <button class="btn btn-outline-danger" onclick="deleteRaffle('${raffleDate}')">🗑 Удалить</button>
+                <button class="btn btn-outline-dark" onclick="rescheduleRaffleJobs('${raffleDate}')">🔁 Перепланировать</button>
+            </div>
+            
+            <div class="card mb-3">
+                <div class="card-body">
+                    <h5>Статистика</h5>
+                    ${startsAt}
+                    <p>Всего участников: ${stats.total_participants || 0}</p>
+                    <p>Принято: ${stats.approved || 0}</p>
+                    <p>Отклонено: ${stats.denied || 0}</p>
+                    <p>Не проверено: ${stats.unchecked || 0}</p>
+                </div>
+            </div>
+            
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h5>Вопросы</h5>
+                <button class="btn btn-outline-primary btn-sm" onclick="showAddRaffleQuestionForm('${raffleDate}')">➕ Добавить вопрос</button>
+            </div>
+            ${questionsHtml}
+            
+            ${uncheckedHtml}
+        `;
+    } catch (error) {
+        const content = document.getElementById('content');
+        content.innerHTML = `
+            <h2>🎁 Розыгрыш ${raffleDate}</h2>
+            <button class="btn btn-secondary mb-3" onclick="loadRaffle()">◀️ Назад к списку</button>
+            <div class="alert alert-danger">
+                Ошибка при загрузке данных: ${error.message}
             </div>
         `;
     }
-    
-    const questionsHtml = questions.questions ? questions.questions.map((q, idx) => `
-        <div class="card mb-2">
-            <div class="card-body">
-                <h6>Вопрос #${q.id || idx + 1}</h6>
-                <p><strong>${q.question || q.question_text || 'Нет текста'}</strong></p>
-                ${q.options ? `
-                    <ul>
-                        ${q.options.map((opt, i) => `
-                            <li>${i + 1}. ${opt} ${i === (q.correct_answer || q.correct) ? '✅' : ''}</li>
-                        `).join('')}
-                    </ul>
-                ` : ''}
-                <button class="btn btn-sm btn-primary" onclick="editRaffleQuestion('${raffleDate}', ${q.id || idx + 1})">✏️ Редактировать</button>
-            </div>
-        </div>
-    `).join('') : '<p>Вопросы не найдены</p>';
-    
-    content.innerHTML = `
-        <h2>🎁 Розыгрыш ${raffleDate}</h2>
-        <button class="btn btn-secondary mb-3" onclick="loadRaffle()">◀️ Назад к списку</button>
-        
-        <div class="card mb-3">
-            <div class="card-body">
-                <h5>Статистика</h5>
-                <p>Всего участников: ${stats.total_participants}</p>
-                <p>Принято: ${stats.approved}</p>
-                <p>Отклонено: ${stats.denied}</p>
-                <p>Не проверено: ${stats.unchecked}</p>
-            </div>
-        </div>
-        
-        <h5>Вопросы</h5>
-        ${questionsHtml}
-        
-        ${uncheckedHtml}
-    `;
 }
 
 async function editRaffleQuestion(raffleDate, questionId) {
-    // TODO: Реализовать модальное окно для редактирования
-    alert(`Редактирование вопроса ${questionId} розыгрыша ${raffleDate} (в разработке)`);
+    try {
+        const question = await apiFetch(`/raffle/${raffleDate}/questions/${questionId}`);
+        
+        const modalHtml = `
+            <div class="modal fade" id="editRaffleQuestionModal" tabindex="-1">
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">✏️ Редактирование вопроса #${questionId}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <form id="editRaffleQuestionForm">
+                                <div class="mb-3">
+                                    <label class="form-label">Название вопроса</label>
+                                    <input type="text" class="form-control" id="rqTitle" value="${escapeHtml(question.title || '')}" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Текст вопроса</label>
+                                    <textarea class="form-control" id="rqText" rows="3" required>${escapeHtml(question.text || '')}</textarea>
+                                </div>
+                            </form>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                            <button type="button" class="btn btn-primary" onclick="saveRaffleQuestion('${raffleDate}', ${questionId})">💾 Сохранить</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        const existing = document.getElementById('editRaffleQuestionModal');
+        if (existing) existing.remove();
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const bsModal = new bootstrap.Modal(document.getElementById('editRaffleQuestionModal'));
+        bsModal.show();
+        document.getElementById('editRaffleQuestionModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    } catch (e) {
+        toastError(e.message || 'Не удалось загрузить вопрос');
+    }
+}
+
+async function saveRaffleQuestion(raffleDate, questionId) {
+    const form = document.getElementById('editRaffleQuestionForm');
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+    const title = document.getElementById('rqTitle').value.trim();
+    const text = document.getElementById('rqText').value.trim();
+    try {
+        await apiAction(`/raffle/${raffleDate}/questions/${questionId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, text })
+        });
+        const modal = bootstrap.Modal.getInstance(document.getElementById('editRaffleQuestionModal'));
+        if (modal) modal.hide();
+        await showRaffleDetails(raffleDate);
+    } catch (e) {
+        // toast already
+    }
+}
+
+async function toggleRaffleDate(raffleDate) {
+    try {
+        const result = await apiAction(`/raffle/${raffleDate}/toggle`, { method: 'POST' });
+        toastSuccess(result.message || 'Сохранено');
+        loadRaffle();
+    } catch (error) {
+        // toast already
+    }
+}
+
+async function rescheduleRaffleJobs(raffleDate) {
+    try {
+        const resp = await apiAction(`/scheduler/raffle/${raffleDate}/reschedule`, { method: 'POST' });
+        toastSuccess(resp.rescheduled ? 'Задачи пересозданы' : 'Scheduler не запущен');
+    } catch (e) {
+        // toast already
+    }
+}
+
+async function editRaffleMeta(raffleDate) {
+    try {
+        const meta = await apiFetch(`/raffle/${raffleDate}/meta`);
+        const currentTitle = meta.title || '';
+        const currentStartsAtLocal = isoToDatetimeLocalMsk(meta.starts_at);
+
+        const modalHtml = `
+            <div class="modal fade" id="editRaffleMetaModal" tabindex="-1">
+                <div class="modal-dialog">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">✏️ Мета розыгрыша ${escapeHtml(raffleDate)}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <form id="editRaffleMetaForm">
+                                <div class="mb-3">
+                                    <label class="form-label">Дата и время старта (МСК)</label>
+                                    <input type="datetime-local" class="form-control" id="ermStartsAt" value="${escapeHtml(currentStartsAtLocal)}" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Заголовок</label>
+                                    <input type="text" class="form-control" id="ermTitle" value="${escapeHtml(currentTitle)}" required>
+                                </div>
+                            </form>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                            <button type="button" class="btn btn-primary" onclick="saveRaffleMeta('${raffleDate}')">💾 Сохранить</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const existing = document.getElementById('editRaffleMetaModal');
+        if (existing) existing.remove();
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const bsModal = new bootstrap.Modal(document.getElementById('editRaffleMetaModal'));
+        bsModal.show();
+        document.getElementById('editRaffleMetaModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    } catch (e) {
+        toastError(e.message || 'Не удалось загрузить метаданные');
+    }
+}
+
+async function saveRaffleMeta(raffleDate) {
+    const form = document.getElementById('editRaffleMetaForm');
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+    const startsAt = document.getElementById('ermStartsAt').value;
+    const title = document.getElementById('ermTitle').value.trim();
+    try {
+        const resp = await apiAction(`/raffle/${raffleDate}/meta`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ starts_at_local: startsAt, title })
+        });
+        toastSuccess(resp.scheduled ? 'Мета обновлена, задачи пересозданы' : 'Мета обновлена (scheduler не запущен)');
+        const modal = bootstrap.Modal.getInstance(document.getElementById('editRaffleMetaModal'));
+        if (modal) modal.hide();
+        await showRaffleDetails(raffleDate);
+    } catch (e) {
+        // toast already
+    }
+}
+
+async function deleteRaffle(raffleDate) {
+    if (!confirm(`Удалить розыгрыш ${raffleDate}? Это действие нельзя отменить.`)) {
+        return;
+    }
+    try {
+        await apiAction(`/raffle/${raffleDate}`, { method: 'DELETE' });
+        toastSuccess('Розыгрыш удален');
+        loadRaffle();
+    } catch (e) {
+        // toast already
+    }
+}
+
+function showAddRaffleQuestionForm(raffleDate) {
+    const modalHtml = `
+        <div class="modal fade" id="addRaffleQuestionModal" tabindex="-1">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">➕ Добавить вопрос</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <form id="addRaffleQuestionForm">
+                            <div class="mb-3">
+                                <label class="form-label">ID вопроса</label>
+                                <input type="number" class="form-control" id="arqId" required>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Название вопроса</label>
+                                <input type="text" class="form-control" id="arqTitle" required>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Текст вопроса</label>
+                                <textarea class="form-control" id="arqText" rows="3" required></textarea>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                        <button type="button" class="btn btn-primary" onclick="saveAddRaffleQuestion('${raffleDate}')">💾 Добавить</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    const existing = document.getElementById('addRaffleQuestionModal');
+    if (existing) existing.remove();
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    const bsModal = new bootstrap.Modal(document.getElementById('addRaffleQuestionModal'));
+    bsModal.show();
+    document.getElementById('addRaffleQuestionModal').addEventListener('hidden.bs.modal', function() {
+        this.remove();
+    });
+}
+
+async function saveAddRaffleQuestion(raffleDate) {
+    const form = document.getElementById('addRaffleQuestionForm');
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+    const questionId = parseInt(document.getElementById('arqId').value);
+    const title = document.getElementById('arqTitle').value.trim();
+    const text = document.getElementById('arqText').value.trim();
+    try {
+        await apiAction(`/raffle/${raffleDate}/questions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question_id: questionId, title, text })
+        });
+        const modal = bootstrap.Modal.getInstance(document.getElementById('addRaffleQuestionModal'));
+        if (modal) modal.hide();
+        await showRaffleDetails(raffleDate);
+    } catch (e) {
+        // toast already
+    }
+}
+
+async function removeRaffleQuestion(raffleDate, questionId) {
+    if (!confirm(`Удалить вопрос #${questionId}?`)) {
+        return;
+    }
+    try {
+        await apiAction(`/raffle/${raffleDate}/questions/${questionId}`, { method: 'DELETE' });
+        toastSuccess('Вопрос удален');
+        await showRaffleDetails(raffleDate);
+    } catch (e) {
+        // toast already
+    }
+}
+
+function showCreateRaffleForm() {
+    const content = document.getElementById('content');
+    content.innerHTML = `
+        <h2>➕ Добавить розыгрыш</h2>
+        <button class="btn btn-secondary mb-3" onclick="loadRaffle()">◀️ Назад к списку</button>
+
+        <div class="card">
+            <div class="card-body">
+                <form id="createRaffleForm">
+                    <div class="mb-3">
+                        <label class="form-label">Дата и время розыгрыша (МСК)</label>
+                        <input type="datetime-local" class="form-control" id="crStartsAt" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Заголовок розыгрыша</label>
+                        <input type="text" class="form-control" id="crTitle" required>
+                    </div>
+
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h5 class="mb-0">Вопросы</h5>
+                        <button type="button" class="btn btn-outline-primary btn-sm" onclick="addCreateRaffleQuestion()">➕ Добавить вопрос</button>
+                    </div>
+
+                    <div id="crQuestions"></div>
+
+                    <div class="mt-3">
+                        <button type="submit" class="btn btn-success">💾 Создать розыгрыш</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+
+    window._crCounter = 0;
+    addCreateRaffleQuestion();
+
+    const form = document.getElementById('createRaffleForm');
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        await submitCreateRaffle();
+    });
+}
+
+function addCreateRaffleQuestion() {
+    const container = document.getElementById('crQuestions');
+    if (!container) return;
+    const id = (++window._crCounter);
+    const block = document.createElement('div');
+    block.className = 'card mb-3';
+    block.setAttribute('data-cr-id', String(id));
+    block.innerHTML = `
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center">
+                <h6 class="mb-2">Вопрос #${id}</h6>
+                <button type="button" class="btn btn-outline-danger btn-sm" onclick="removeCreateRaffleQuestion(${id})">🗑 Удалить</button>
+            </div>
+            <div class="mb-2">
+                <label class="form-label">ID вопроса</label>
+                <input type="number" class="form-control" id="crQId_${id}" value="${id}" required>
+            </div>
+            <div class="mb-2">
+                <label class="form-label">Название вопроса</label>
+                <input type="text" class="form-control" id="crQTitle_${id}" required>
+            </div>
+            <div class="mb-2">
+                <label class="form-label">Текст вопроса</label>
+                <textarea class="form-control" id="crQText_${id}" rows="2" required></textarea>
+            </div>
+        </div>
+    `;
+    container.appendChild(block);
+    _ensureCreateRaffleRemoveButtons();
+}
+
+function removeCreateRaffleQuestion(id) {
+    const container = document.getElementById('crQuestions');
+    if (!container) return;
+    const blocks = container.querySelectorAll('[data-cr-id]');
+    if (blocks.length <= 1) {
+        alert('Должен быть минимум 1 вопрос');
+        return;
+    }
+    const el = container.querySelector(`[data-cr-id="${id}"]`);
+    if (el) el.remove();
+    _ensureCreateRaffleRemoveButtons();
+}
+
+function _ensureCreateRaffleRemoveButtons() {
+    const container = document.getElementById('crQuestions');
+    if (!container) return;
+    const blocks = container.querySelectorAll('[data-cr-id]');
+    const disableRemove = blocks.length <= 1;
+    blocks.forEach(b => {
+        const btn = b.querySelector('button.btn-outline-danger');
+        if (btn) btn.disabled = disableRemove;
+    });
+}
+
+async function submitCreateRaffle() {
+    const startsAt = document.getElementById('crStartsAt').value;
+    const title = document.getElementById('crTitle').value.trim();
+    if (!startsAt) {
+        alert('Выберите дату и время розыгрыша');
+        return;
+    }
+    if (!title) {
+        alert('Введите заголовок розыгрыша');
+        return;
+    }
+
+    const container = document.getElementById('crQuestions');
+    const blocks = Array.from(container.querySelectorAll('[data-cr-id]'));
+    if (blocks.length < 1) {
+        alert('Добавьте минимум 1 вопрос');
+        return;
+    }
+
+    const questions = blocks.map((b) => {
+        const id = b.getAttribute('data-cr-id');
+        const questionId = parseInt(document.getElementById(`crQId_${id}`).value);
+        const questionTitle = document.getElementById(`crQTitle_${id}`).value.trim();
+        const questionText = document.getElementById(`crQText_${id}`).value.trim();
+        return { id: questionId, title: questionTitle, text: questionText };
+    });
+
+    for (let i = 0; i < questions.length; i++) {
+        const q = questions[i];
+        if (!q.title || !q.text) {
+            toastError(`Вопрос #${i + 1}: заполните все поля`);
+            return;
+        }
+    }
+
+    try {
+        const resp = await apiAction('/raffle/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                starts_at_local: startsAt,
+                title,
+                questions
+            })
+        });
+        toastSuccess(`Розыгрыш создан на дату ${resp.raffle_date}${resp.scheduled ? ' (задачи обновлены)' : ''}`);
+        await showRaffleDetails(resp.raffle_date);
+    } catch (error) {
+        // toast уже показан в apiAction
+    }
 }
 
 
@@ -1301,23 +1920,74 @@ async function searchTicket() {
 // Показать информацию о билетике
 function showTicketInfo(data) {
     const content = document.getElementById('content');
-    const ticketsHtml = data.tickets.map((t, i) => `
-        <tr>
-            <td>${i + 1}</td>
-            <td>${t.user_id}</td>
-            <td>${t.source}</td>
-            <td>${t.date}</td>
-            <td>${t.time_display}</td>
-            <td>${t.db_id}</td>
-            <td>
-                <button class="btn btn-sm btn-danger" onclick="removeTicket(${t.user_id}, ${data.ticket_number})">🗑️ Удалить</button>
-            </td>
-        </tr>
-    `).join('');
+    const ticketsHtml = data.tickets.map((t, i) => {
+        let userInfoHtml = '';
+        if (t.user) {
+            const u = t.user;
+            if (u.registration_completed) {
+                // Пользователь зарегистрирован
+                userInfoHtml = `
+                    <div class="card mt-2">
+                        <div class="card-body">
+                            <h6>Информация о пользователе (зарегистрирован)</h6>
+                            <p><strong>ID:</strong> ${u.id}</p>
+                            <p><strong>Username:</strong> ${u.username || '-'}</p>
+                            <p><strong>Имя в ТГ:</strong> ${u.first_name || '-'}</p>
+                            <p><strong>Статус сотрудника:</strong> ${u.registration_status_display || u.registration_status || '-'}</p>
+                            <p><strong>Имя (из регистрации):</strong> ${u.registration_first_name || '-'}</p>
+                            <p><strong>Фамилия (из регистрации):</strong> ${u.registration_last_name || '-'}</p>
+                            <p><strong>Должность (из регистрации):</strong> ${u.registration_position || '-'}</p>
+                            <p><strong>Дата регистрации:</strong> ${u.created_at ? new Date(u.created_at).toLocaleString('ru-RU') : '-'}</p>
+                        </div>
+                    </div>
+                `;
+            } else {
+                // Пользователь не зарегистрирован
+                userInfoHtml = `
+                    <div class="card mt-2">
+                        <div class="card-body">
+                            <h6>Информация о пользователе (не зарегистрирован)</h6>
+                            <p><strong>ID:</strong> ${u.id}</p>
+                            <p><strong>Username:</strong> ${u.username || '-'}</p>
+                            <p><strong>Имя в ТГ:</strong> ${u.first_name || '-'}</p>
+                        </div>
+                    </div>
+                `;
+            }
+        } else {
+            // Пользователь не найден в БД
+            userInfoHtml = `
+                <div class="card mt-2">
+                    <div class="card-body">
+                        <h6>Информация о пользователе</h6>
+                        <p><strong>ID:</strong> ${t.user_id}</p>
+                        <p class="text-muted">Пользователь не найден в базе данных</p>
+                    </div>
+                </div>
+            `;
+        }
+        
+        return `
+            <tr>
+                <td>${i + 1}</td>
+                <td>${t.user_id}</td>
+                <td>${t.source}</td>
+                <td>${t.date}</td>
+                <td>${t.time_display}</td>
+                <td>${t.db_id}</td>
+                <td>
+                    <button class="btn btn-sm btn-danger" onclick="removeTicket(${t.user_id}, ${data.ticket_number})">🗑️ Удалить</button>
+                </td>
+            </tr>
+            <tr>
+                <td colspan="7">${userInfoHtml}</td>
+            </tr>
+        `;
+    }).join('');
     
     const modal = `
         <div class="modal fade" id="ticketModal" tabindex="-1">
-            <div class="modal-dialog modal-lg">
+            <div class="modal-dialog modal-xl">
                 <div class="modal-content">
                     <div class="modal-header">
                         <h5 class="modal-title">🎟 Билетик №${data.ticket_number}</h5>

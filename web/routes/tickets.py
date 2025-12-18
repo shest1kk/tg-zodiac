@@ -271,25 +271,30 @@ async def get_user_tickets(user_id: int, username: str = Depends(get_current_use
 
 @router.get("/check_time/{ticket_number}")
 async def check_ticket_time(ticket_number: int, username: str = Depends(get_current_user)):
-    """Проверить время выдачи билетика"""
+    """Проверить время выдачи билетика с информацией о пользователе"""
     from datetime import datetime, timezone, timedelta
+    from database import User
     
     async with AsyncSessionLocal() as session:
-        # Ищем билетики в квизах
+        # Ищем билетики в квизах с информацией о пользователе
         quiz_result = await session.execute(
-            select(QuizResult).where(
+            select(QuizResult, User).outerjoin(
+                User, QuizResult.user_id == User.id
+            ).where(
                 QuizResult.ticket_number == ticket_number
             ).order_by(QuizResult.completed_at.asc())
         )
-        quiz_tickets = quiz_result.scalars().all()
+        quiz_tickets = quiz_result.all()
         
-        # Ищем билетики в розыгрышах
+        # Ищем билетики в розыгрышах с информацией о пользователе
         raffle_result = await session.execute(
-            select(RaffleParticipant).where(
+            select(RaffleParticipant, User).outerjoin(
+                User, RaffleParticipant.user_id == User.id
+            ).where(
                 RaffleParticipant.ticket_number == ticket_number
             ).order_by(RaffleParticipant.timestamp.asc())
         )
-        raffle_tickets = raffle_result.scalars().all()
+        raffle_tickets = raffle_result.all()
         
         if not quiz_tickets and not raffle_tickets:
             raise HTTPException(status_code=404, detail=f"Билетик №{ticket_number} не найден")
@@ -298,7 +303,7 @@ async def check_ticket_time(ticket_number: int, username: str = Depends(get_curr
         all_tickets = []
         
         # Обрабатываем квизы
-        for ticket in quiz_tickets:
+        for ticket, user in quiz_tickets:
             try:
                 date_obj = datetime.strptime(ticket.quiz_date, "%Y-%m-%d")
                 date_display = date_obj.strftime("%d.%m.%Y")
@@ -315,17 +320,42 @@ async def check_ticket_time(ticket_number: int, username: str = Depends(get_curr
             else:
                 time_display = "неизвестно"
             
+            # Формируем информацию о пользователе
+            user_info = None
+            if user:
+                status_map = {
+                    "current_employee": "Действующий сотрудник",
+                    "former_employee": "Бывший сотрудник",
+                    "other": "Другое"
+                }
+                user_info = {
+                    "id": user.id,
+                    "username": user.username,
+                    "first_name": user.first_name,
+                    "registration_completed": user.registration_completed,
+                    "registration_status": user.registration_status,
+                    "registration_status_display": status_map.get(user.registration_status, user.registration_status) if user.registration_status else None,
+                    "registration_first_name": user.registration_first_name,
+                    "registration_last_name": user.registration_last_name,
+                    "registration_position": user.registration_position,
+                    "registration_department": user.registration_department,
+                    "registration_city": user.registration_city,
+                    "registration_source": user.registration_source,
+                    "created_at": user.created_at.isoformat() if user.created_at else None
+                }
+            
             all_tickets.append({
                 'user_id': ticket.user_id,
                 'source': 'квиз',
                 'date': date_display,
                 'time': ticket.completed_at.isoformat() if ticket.completed_at else None,
                 'time_display': time_display,
-                'db_id': ticket.id
+                'db_id': ticket.id,
+                'user': user_info
             })
         
         # Обрабатываем розыгрыши
-        for ticket in raffle_tickets:
+        for ticket, user in raffle_tickets:
             try:
                 date_obj = datetime.strptime(ticket.raffle_date, "%Y-%m-%d")
                 date_display = date_obj.strftime("%d.%m.%Y")
@@ -342,13 +372,38 @@ async def check_ticket_time(ticket_number: int, username: str = Depends(get_curr
             else:
                 time_display = "неизвестно"
             
+            # Формируем информацию о пользователе
+            user_info = None
+            if user:
+                status_map = {
+                    "current_employee": "Действующий сотрудник",
+                    "former_employee": "Бывший сотрудник",
+                    "other": "Другое"
+                }
+                user_info = {
+                    "id": user.id,
+                    "username": user.username,
+                    "first_name": user.first_name,
+                    "registration_completed": user.registration_completed,
+                    "registration_status": user.registration_status,
+                    "registration_status_display": status_map.get(user.registration_status, user.registration_status) if user.registration_status else None,
+                    "registration_first_name": user.registration_first_name,
+                    "registration_last_name": user.registration_last_name,
+                    "registration_position": user.registration_position,
+                    "registration_department": user.registration_department,
+                    "registration_city": user.registration_city,
+                    "registration_source": user.registration_source,
+                    "created_at": user.created_at.isoformat() if user.created_at else None
+                }
+            
             all_tickets.append({
                 'user_id': ticket.user_id,
                 'source': 'розыгрыш',
                 'date': date_display,
                 'time': ticket.timestamp.isoformat() if ticket.timestamp else None,
                 'time_display': time_display,
-                'db_id': ticket.id
+                'db_id': ticket.id,
+                'user': user_info
             })
         
         # Сортируем по времени

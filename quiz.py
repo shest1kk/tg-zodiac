@@ -11,7 +11,7 @@ from aiogram import types
 from sqlalchemy import select, and_, func
 from sqlalchemy.exc import SQLAlchemyError
 from database import AsyncSessionLocal, User, Quiz, QuizParticipant, QuizResult
-from resilience import safe_send_message, safe_send_photo
+from resilience import safe_send_message, safe_send_message_with_result, safe_send_photo, safe_edit_message_text
 
 logger = logging.getLogger(__name__)
 
@@ -523,13 +523,19 @@ async def send_quiz_announcement(bot, user_id: int, quiz_date: str, force_send: 
             )]
         ])
         
-        # Отправляем сообщение
-        message = await bot.send_message(
+        # Отправляем сообщение с обработкой rate limiting
+        message = await safe_send_message_with_result(
+            bot,
             user_id,
             announcement_text,
             parse_mode="HTML",
             reply_markup=keyboard
         )
+        
+        # Если сообщение не было отправлено, возвращаем False
+        if not message:
+            logger.error(f"Не удалось отправить объявление о квизе {quiz_date} пользователю {user_id}")
+            return False
         
         # Сохраняем или обновляем участника
         announcement_time_utc = moscow_now.astimezone(timezone.utc).replace(tzinfo=None)
@@ -826,15 +832,17 @@ async def check_quiz_timeout(bot, user_id: int, quiz_date: str):
                 
                 # Пытаемся отредактировать сообщение с вопросами
                 if participant.message_id:
-                    try:
-                        await bot.edit_message_text(
-                            chat_id=user_id,
-                            message_id=participant.message_id,
-                            text=timeout_message
-                        )
+                    # Редактируем сообщение с обработкой rate limiting
+                    edit_success = await safe_edit_message_text(
+                        bot,
+                        chat_id=user_id,
+                        message_id=participant.message_id,
+                        text=timeout_message
+                    )
+                    if edit_success:
                         logger.info(f"Сообщение о таймауте квиза отредактировано для пользователя {user_id}")
-                    except Exception as e:
-                        logger.warning(f"Не удалось отредактировать сообщение о таймауте для пользователя {user_id}: {e}")
+                    else:
+                        logger.warning(f"Не удалось отредактировать сообщение о таймауте для пользователя {user_id}")
                         # Если не удалось отредактировать, отправляем новое сообщение
                         await safe_send_message(bot, user_id, timeout_message)
                 else:

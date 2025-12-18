@@ -155,6 +155,18 @@ def _schedule_all_quizzes_from_json():
         logger.error(f"Ошибка при планировании квизов из quiz.json: {e}", exc_info=True)
 
 
+def _schedule_all_raffles_from_json():
+    """Планирует все розыгрыши, которые есть в data/question.json."""
+    try:
+        from raffle import get_all_raffle_dates
+        dates = get_all_raffle_dates()
+        # Сортируем по дате на всякий случай
+        for raffle_date in sorted(dates):
+            _schedule_raffle_jobs_for_date(raffle_date)
+    except Exception as e:
+        logger.error(f"Ошибка при планировании розыгрышей из question.json: {e}", exc_info=True)
+
+
 def get_jobs_snapshot() -> dict:
     """Снимок состояния APScheduler для админки."""
     global scheduler
@@ -200,6 +212,123 @@ def reschedule_quiz_jobs_if_running(quiz_date: str) -> bool:
             pass
 
     _schedule_quiz_jobs_for_date(quiz_date)
+    return True
+
+
+def _raffle_disabled_file() -> Path:
+    base_dir = Path(__file__).parent
+    return base_dir / "data" / "raffle_disabled_dates.json"
+
+
+def _load_raffle_disabled_dates() -> set[str]:
+    disabled_file = _raffle_disabled_file()
+    try:
+        if disabled_file.exists():
+            with open(disabled_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                dates = data.get("dates", [])
+                if isinstance(dates, list):
+                    return set(str(d).strip() for d in dates if str(d).strip())
+    except Exception as e:
+        logger.warning(f"Не удалось загрузить raffle_disabled_dates.json: {e}")
+    return set()
+
+
+def _is_raffle_disabled(raffle_date: str) -> bool:
+    return raffle_date in _load_raffle_disabled_dates()
+
+
+def _schedule_raffle_jobs_for_date(raffle_date: str):
+    """Планирует объявление/напоминание/закрытие для конкретного розыгрыша.
+
+    Время берётся из meta.starts_at в data/question.json, иначе из RAFFLE_HOUR/RAFFLE_MINUTE.
+    """
+    global scheduler
+    if scheduler is None:
+        return
+
+    if _is_raffle_disabled(raffle_date):
+        logger.info(f"⏭️ Розыгрыш для {raffle_date} отключен (raffle_disabled_dates.json), пропускаю планирование")
+        return
+
+    try:
+        from raffle import get_raffle_start_datetime_moscow
+        starts_at_moscow = get_raffle_start_datetime_moscow(raffle_date)
+        if not starts_at_moscow:
+            logger.warning(f"Не удалось получить starts_at для розыгрыша {raffle_date}, пропускаю")
+            return
+
+        now_utc = datetime.now(timezone.utc)
+
+        announcement_datetime = starts_at_moscow.astimezone(timezone.utc)
+        reminder_datetime = (starts_at_moscow + timedelta(hours=RAFFLE_REMINDER_DELAY)).astimezone(timezone.utc)
+        close_datetime = (starts_at_moscow + timedelta(hours=RAFFLE_PARTICIPATION_WINDOW)).astimezone(timezone.utc)
+
+        if announcement_datetime > now_utc:
+            scheduler.add_job(
+                send_raffle_announcements_for_date,
+                "date",
+                run_date=announcement_datetime,
+                id=f"raffle_announcements_{raffle_date}",
+                replace_existing=True,
+                args=[raffle_date],
+            )
+            logger.info(
+                f"✅ Задача объявления розыгрыша для {raffle_date} запланирована на "
+                f"{announcement_datetime.strftime('%d.%m.%Y %H:%M')} UTC "
+                f"({starts_at_moscow.strftime('%d.%m.%Y %H:%M')} МСК)"
+            )
+        else:
+            logger.debug(f"⏰ Время объявления розыгрыша для {raffle_date} уже прошло, задача не будет создана")
+
+        if reminder_datetime > now_utc:
+            scheduler.add_job(
+                send_raffle_reminders_for_date,
+                "date",
+                run_date=reminder_datetime,
+                id=f"raffle_reminders_{raffle_date}",
+                replace_existing=True,
+                args=[raffle_date],
+            )
+            logger.info(f"✅ Задача напоминания розыгрыша для {raffle_date} запланирована на {reminder_datetime.strftime('%d.%m.%Y %H:%M')} UTC")
+
+        if close_datetime > now_utc:
+            scheduler.add_job(
+                close_raffle_automatically,
+                "date",
+                run_date=close_datetime,
+                id=f"raffle_close_{raffle_date}",
+                replace_existing=True,
+                args=[raffle_date],
+            )
+            logger.info(f"✅ Задача закрытия розыгрыша для {raffle_date} запланирована на {close_datetime.strftime('%d.%m.%Y %H:%M')} UTC")
+
+    except Exception as e:
+        logger.error(f"Ошибка при планировании розыгрыша {raffle_date}: {e}", exc_info=True)
+
+
+def schedule_raffle_jobs_if_running(raffle_date: str) -> bool:
+    """Публичный хук для web-админки: сразу добавить задачи нового розыгрыша без рестарта бота."""
+    global scheduler
+    if scheduler is None or not getattr(scheduler, "running", False):
+        return False
+    _schedule_raffle_jobs_for_date(raffle_date)
+    return True
+
+
+def reschedule_raffle_jobs_if_running(raffle_date: str) -> bool:
+    """Удаляет и пересоздаёт задачи конкретного розыгрыша (если scheduler запущен)."""
+    global scheduler
+    if not scheduler or not getattr(scheduler, "running", False):
+        return False
+
+    for job_id in (f"raffle_announcements_{raffle_date}", f"raffle_reminders_{raffle_date}", f"raffle_close_{raffle_date}"):
+        try:
+            scheduler.remove_job(job_id)
+        except Exception:
+            pass
+
+    _schedule_raffle_jobs_for_date(raffle_date)
     return True
 
 
@@ -448,6 +577,10 @@ def start_scheduler():
         timezone="UTC"
     )
     
+    # Планировщик для розыгрышей: из question.json (с метаданными) или из констант
+    _schedule_all_raffles_from_json()
+    
+    # Старый код для обратной совместимости (если розыгрыши не в question.json)
     # Планировщик для розыгрышей: конкретные даты в указанное время МСК (конвертируется в UTC)
     # Конвертируем МСК в UTC: вычитаем 3 часа
     raffle_time_moscow = dt_time(hour=RAFFLE_HOUR, minute=RAFFLE_MINUTE)

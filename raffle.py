@@ -12,7 +12,7 @@ from aiogram import types
 from sqlalchemy import select, and_
 from sqlalchemy.exc import SQLAlchemyError
 from database import AsyncSessionLocal, User, RaffleParticipant, Raffle, QuizResult
-from resilience import safe_send_message, safe_send_photo
+from resilience import safe_send_message, safe_send_message_with_result, safe_send_photo, safe_edit_message_text
 from sqlalchemy import func
 
 logger = logging.getLogger(__name__)
@@ -109,7 +109,14 @@ def get_random_question(raffle_date: str) -> Optional[Dict]:
         logger.warning(f"Вопросы для даты {raffle_date} не найдены")
         return None
     
-    questions = raffle_dates[raffle_date]
+    raffle_data = raffle_dates[raffle_date]
+    # Поддержка нового формата с метаданными
+    if isinstance(raffle_data, dict) and "questions" in raffle_data:
+        questions = raffle_data["questions"]
+    else:
+        # Старый формат
+        questions = raffle_data
+    
     if not questions:
         return None
     
@@ -131,7 +138,14 @@ def get_question_by_id(question_id: int, raffle_date: str) -> Optional[Dict]:
     if raffle_date not in raffle_dates:
         return None
     
-    questions = raffle_dates[raffle_date]
+    raffle_data = raffle_dates[raffle_date]
+    # Поддержка нового формата с метаданными
+    if isinstance(raffle_data, dict) and "questions" in raffle_data:
+        questions = raffle_data["questions"]
+    else:
+        # Старый формат
+        questions = raffle_data
+    
     for question_key, question in questions.items():
         if question.get("id") == question_id:
             return question
@@ -151,13 +165,24 @@ def get_all_questions(raffle_date: str = None) -> List[Dict]:
         # Возвращаем вопросы для конкретной даты
         if raffle_date not in raffle_dates:
             return []
-        questions = raffle_dates[raffle_date]
+        raffle_data = raffle_dates[raffle_date]
+        # Поддержка нового формата с метаданными
+        if isinstance(raffle_data, dict) and "questions" in raffle_data:
+            questions = raffle_data["questions"]
+        else:
+            # Старый формат
+            questions = raffle_data
         return list(questions.values())
     else:
         # Возвращаем все вопросы из всех дат
         all_questions = []
         for date_questions in raffle_dates.values():
-            all_questions.extend(list(date_questions.values()))
+            # Поддержка нового формата
+            if isinstance(date_questions, dict) and "questions" in date_questions:
+                questions = date_questions["questions"]
+            else:
+                questions = date_questions
+            all_questions.extend(list(questions.values()))
         return all_questions
 
 
@@ -210,7 +235,14 @@ def update_question(question_id: int, raffle_date: str, title: str, text: str) -
     if raffle_date not in raffle_dates:
         return False
     
-    questions = raffle_dates[raffle_date]
+    # Поддержка нового формата с метаданными
+    raffle_data = raffle_dates[raffle_date]
+    if isinstance(raffle_data, dict) and "questions" in raffle_data:
+        questions = raffle_data["questions"]
+    else:
+        # Старый формат - вопросы напрямую
+        questions = raffle_data
+    
     for question_key, question in questions.items():
         if question.get("id") == question_id:
             question["title"] = title
@@ -218,6 +250,125 @@ def update_question(question_id: int, raffle_date: str, title: str, text: str) -
             return save_questions_data(questions_data)
     
     return False
+
+
+def get_raffle_meta(raffle_date: str) -> Dict:
+    """Получает метаданные розыгрыша (заголовок, время старта)
+    
+    Returns:
+        Словарь с метаданными или пустой словарь, если метаданных нет
+    """
+    questions_data = load_questions()
+    if not questions_data or "raffle_dates" not in questions_data:
+        return {}
+    
+    raffle_dates = questions_data["raffle_dates"]
+    if raffle_date not in raffle_dates:
+        return {}
+    
+    raffle_data = raffle_dates[raffle_date]
+    if isinstance(raffle_data, dict) and "meta" in raffle_data:
+        return raffle_data["meta"].copy()
+    
+    # Если метаданных нет, возвращаем пустой словарь
+    return {}
+
+
+def get_raffle_start_datetime_moscow(raffle_date: str) -> Optional[datetime]:
+    """Получает дату и время старта розыгрыша в МСК
+    
+    Сначала проверяет метаданные в question.json, если их нет - использует константы
+    """
+    meta = get_raffle_meta(raffle_date)
+    if meta and "starts_at" in meta:
+        try:
+            starts_at_str = meta["starts_at"]
+            if isinstance(starts_at_str, str):
+                # Парсим ISO формат
+                dt = datetime.fromisoformat(starts_at_str.replace('Z', '+00:00'))
+                if dt.tzinfo is None:
+                    # Если timezone не указан, считаем что это МСК
+                    dt = dt.replace(tzinfo=MOSCOW_TZ)
+                else:
+                    # Конвертируем в МСК
+                    dt = dt.astimezone(MOSCOW_TZ)
+                return dt
+        except Exception as e:
+            logger.warning(f"Ошибка при парсинге starts_at для розыгрыша {raffle_date}: {e}")
+    
+    # Fallback на константы
+    try:
+        date_obj = datetime.strptime(raffle_date, "%Y-%m-%d")
+        starts_at = datetime.combine(
+            date_obj.date(),
+            dt_time(RAFFLE_HOUR, RAFFLE_MINUTE),
+            MOSCOW_TZ
+        )
+        return starts_at
+    except Exception as e:
+        logger.error(f"Ошибка при создании datetime для розыгрыша {raffle_date}: {e}")
+        return None
+
+
+def set_raffle_meta_from_local(raffle_date: str, title: str, starts_at_local: str) -> Dict:
+    """Устанавливает метаданные розыгрыша из локального времени (МСК)
+    
+    Args:
+        raffle_date: Дата розыгрыша (YYYY-MM-DD)
+        title: Заголовок розыгрыша
+        starts_at_local: Дата и время старта в формате YYYY-MM-DDTHH:MM (интерпретируется как МСК)
+        
+    Returns:
+        Словарь с результатом: {"success": bool, "error": str или None}
+    """
+    try:
+        # Парсим datetime-local (интерпретируем как МСК)
+        starts_at = datetime.fromisoformat(starts_at_local.strip())
+        if starts_at.tzinfo is not None:
+            starts_at = starts_at.astimezone(MOSCOW_TZ).replace(tzinfo=MOSCOW_TZ)
+        else:
+            starts_at = starts_at.replace(tzinfo=MOSCOW_TZ)
+        
+        # Проверяем, что дата совпадает
+        if starts_at.date().strftime("%Y-%m-%d") != raffle_date:
+            return {"success": False, "error": f"Дата в starts_at_local должна быть {raffle_date}"}
+        
+        questions_data = load_questions()
+        if not questions_data:
+            questions_data = {"raffle_dates": {}}
+        if "raffle_dates" not in questions_data:
+            questions_data["raffle_dates"] = {}
+        
+        raffle_dates = questions_data["raffle_dates"]
+        if raffle_date not in raffle_dates:
+            return {"success": False, "error": f"Розыгрыш для даты {raffle_date} не найден"}
+        
+        raffle_data = raffle_dates[raffle_date]
+        
+        # Поддержка нового формата с метаданными
+        if isinstance(raffle_data, dict) and "questions" in raffle_data:
+            # Уже новый формат
+            questions = raffle_data["questions"]
+        else:
+            # Старый формат - конвертируем в новый
+            questions = raffle_data
+            raffle_data = {"meta": {}, "questions": questions}
+            raffle_dates[raffle_date] = raffle_data
+        
+        # Обновляем метаданные
+        raffle_data["meta"] = {
+            "title": title.strip(),
+            "starts_at": starts_at.isoformat()
+        }
+        
+        if save_questions_data(questions_data):
+            return {"success": True}
+        else:
+            return {"success": False, "error": "Не удалось сохранить question.json"}
+            
+    except Exception as e:
+        logger.error(f"Ошибка при установке метаданных розыгрыша: {e}")
+        return {"success": False, "error": str(e)}
 
 
 async def has_raffle_started(raffle_date: str) -> bool:
@@ -554,12 +705,19 @@ async def send_raffle_announcement(bot, user_id: int, raffle_date: str, force_se
     ])
     
     try:
-        message = await bot.send_message(
+        # Отправляем сообщение с обработкой rate limiting
+        message = await safe_send_message_with_result(
+            bot,
             user_id,
             text,
             parse_mode="HTML",
             reply_markup=keyboard
         )
+        
+        # Если сообщение не было отправлено, возвращаем None
+        if not message:
+            logger.error(f"Не удалось отправить объявление о розыгрыше {raffle_date} пользователю {user_id}")
+            return None
         
         # Сохраняем время отправки объявления (МСК -> UTC для БД)
         announcement_time_moscow = datetime.now(MOSCOW_TZ)
@@ -701,17 +859,18 @@ async def handle_raffle_participation(bot, user_id: int, message_id: int, raffle
             f"{warning_text}"
         )
         
-        try:
-            keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])  # Убираем кнопку
-            await bot.edit_message_text(
-                question_text,
-                chat_id=user_id,
-                message_id=message_id,
-                parse_mode="HTML",
-                reply_markup=keyboard
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при редактировании сообщения {message_id}: {e}")
+        # Редактируем сообщение с обработкой rate limiting
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])  # Убираем кнопку
+        edit_success = await safe_edit_message_text(
+            bot,
+            chat_id=user_id,
+            message_id=message_id,
+            text=question_text,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        if not edit_success:
+            logger.warning(f"Не удалось отредактировать сообщение {message_id}, отправляем новое")
             # Если не удалось отредактировать, отправляем новое сообщение
             await safe_send_message(bot, user_id, question_text, parse_mode="HTML")
         
@@ -1078,3 +1237,188 @@ async def deny_answer(user_id: int, raffle_date: str) -> bool:
     except Exception as e:
         logger.error(f"Ошибка при отклонении ответа: {e}")
         return False
+
+
+def create_raffle_data(raffle_date: str, starts_at_local: str, title: str, questions: List[Dict]) -> Dict:
+    """Создает новый розыгрыш с вопросами
+    
+    Args:
+        raffle_date: Дата розыгрыша (YYYY-MM-DD)
+        starts_at_local: Дата и время старта в формате YYYY-MM-DDTHH:MM (МСК)
+        title: Заголовок розыгрыша
+        questions: Список вопросов [{"id": 1, "title": "...", "text": "..."}, ...]
+        
+    Returns:
+        {"success": bool, "error": str или None, "raffle_date": str}
+    """
+    try:
+        # Парсим datetime-local (интерпретируем как МСК)
+        starts_at = datetime.fromisoformat(starts_at_local.strip())
+        if starts_at.tzinfo is not None:
+            starts_at = starts_at.astimezone(MOSCOW_TZ).replace(tzinfo=MOSCOW_TZ)
+        else:
+            starts_at = starts_at.replace(tzinfo=MOSCOW_TZ)
+        
+        # Проверяем, что дата совпадает
+        if starts_at.date().strftime("%Y-%m-%d") != raffle_date:
+            return {"success": False, "error": f"Дата в starts_at_local должна быть {raffle_date}"}
+        
+        questions_data = load_questions()
+        if not questions_data:
+            questions_data = {"raffle_dates": {}}
+        if "raffle_dates" not in questions_data:
+            questions_data["raffle_dates"] = {}
+        
+        raffle_dates = questions_data["raffle_dates"]
+        if raffle_date in raffle_dates:
+            return {"success": False, "error": f"Розыгрыш на дату {raffle_date} уже существует"}
+        
+        # Нормализуем вопросы
+        questions_dict = {}
+        for q in questions:
+            q_id = q.get("id")
+            if not q_id:
+                return {"success": False, "error": "Каждый вопрос должен иметь id"}
+            questions_dict[str(q_id)] = {
+                "id": q_id,
+                "title": q.get("title", "").strip(),
+                "text": q.get("text", "").strip()
+            }
+        
+        if not questions_dict:
+            return {"success": False, "error": "Должен быть минимум 1 вопрос"}
+        
+        # Создаем структуру с метаданными
+        raffle_dates[raffle_date] = {
+            "meta": {
+                "title": title.strip(),
+                "starts_at": starts_at.isoformat()
+            },
+            "questions": questions_dict
+        }
+        
+        if save_questions_data(questions_data):
+            return {"success": True, "raffle_date": raffle_date}
+        else:
+            return {"success": False, "error": "Не удалось сохранить question.json"}
+            
+    except Exception as e:
+        logger.error(f"Ошибка при создании розыгрыша: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def delete_raffle(raffle_date: str) -> Dict:
+    """Удаляет розыгрыш (вопросы и метаданные)
+    
+    Returns:
+        {"success": bool, "error": str или None}
+    """
+    try:
+        questions_data = load_questions()
+        if not questions_data or "raffle_dates" not in questions_data:
+            return {"success": False, "error": "Розыгрыш не найден"}
+        
+        raffle_dates = questions_data["raffle_dates"]
+        if raffle_date not in raffle_dates:
+            return {"success": False, "error": "Розыгрыш не найден"}
+        
+        # Проверяем, не начался ли розыгрыш
+        if await has_raffle_started(raffle_date):
+            return {"success": False, "error": "Нельзя удалить розыгрыш, который уже начался"}
+        
+        del raffle_dates[raffle_date]
+        
+        if save_questions_data(questions_data):
+            return {"success": True}
+        else:
+            return {"success": False, "error": "Не удалось сохранить question.json"}
+            
+    except Exception as e:
+        logger.error(f"Ошибка при удалении розыгрыша: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def add_raffle_question(raffle_date: str, question_id: int, title: str, text: str) -> Dict:
+    """Добавляет вопрос к розыгрышу
+    
+    Returns:
+        {"success": bool, "error": str или None}
+    """
+    try:
+        questions_data = load_questions()
+        if not questions_data or "raffle_dates" not in questions_data:
+            return {"success": False, "error": "Розыгрыш не найден"}
+        
+        raffle_dates = questions_data["raffle_dates"]
+        if raffle_date not in raffle_dates:
+            return {"success": False, "error": "Розыгрыш не найден"}
+        
+        raffle_data = raffle_dates[raffle_date]
+        # Поддержка нового формата
+        if isinstance(raffle_data, dict) and "questions" in raffle_data:
+            questions = raffle_data["questions"]
+        else:
+            # Старый формат - конвертируем
+            questions = raffle_data
+            raffle_data = {"meta": {}, "questions": questions}
+            raffle_dates[raffle_date] = raffle_data
+        
+        # Проверяем, не существует ли уже вопрос с таким ID
+        if str(question_id) in questions:
+            return {"success": False, "error": f"Вопрос с ID {question_id} уже существует"}
+        
+        questions[str(question_id)] = {
+            "id": question_id,
+            "title": title.strip(),
+            "text": text.strip()
+        }
+        
+        if save_questions_data(questions_data):
+            return {"success": True}
+        else:
+            return {"success": False, "error": "Не удалось сохранить question.json"}
+            
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении вопроса: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def remove_raffle_question(raffle_date: str, question_id: int) -> Dict:
+    """Удаляет вопрос из розыгрыша
+    
+    Returns:
+        {"success": bool, "error": str или None}
+    """
+    try:
+        questions_data = load_questions()
+        if not questions_data or "raffle_dates" not in questions_data:
+            return {"success": False, "error": "Розыгрыш не найден"}
+        
+        raffle_dates = questions_data["raffle_dates"]
+        if raffle_date not in raffle_dates:
+            return {"success": False, "error": "Розыгрыш не найден"}
+        
+        raffle_data = raffle_dates[raffle_date]
+        # Поддержка нового формата
+        if isinstance(raffle_data, dict) and "questions" in raffle_data:
+            questions = raffle_data["questions"]
+        else:
+            return {"success": False, "error": "Розыгрыш в старом формате"}
+        
+        if str(question_id) not in questions:
+            return {"success": False, "error": "Вопрос не найден"}
+        
+        # Проверяем, не начался ли розыгрыш
+        if await has_raffle_started(raffle_date):
+            return {"success": False, "error": "Нельзя удалить вопрос из розыгрыша, который уже начался"}
+        
+        del questions[str(question_id)]
+        
+        if save_questions_data(questions_data):
+            return {"success": True}
+        else:
+            return {"success": False, "error": "Не удалось сохранить question.json"}
+            
+    except Exception as e:
+        logger.error(f"Ошибка при удалении вопроса: {e}")
+        return {"success": False, "error": str(e)}

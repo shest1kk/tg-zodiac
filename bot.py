@@ -18,7 +18,7 @@ from sqlalchemy import select, and_, func
 from database import AsyncSessionLocal, init_db, User, RaffleParticipant, Raffle, Quiz, QuizParticipant, QuizResult
 from config import TG_TOKEN, DAILY_HOUR, DAILY_MINUTE, logger, ZODIAC_NAMES, ADMIN_ID, ADMIN_IDS
 from scheduler import start_scheduler, stop_scheduler, get_day_number, get_today_prediction, load_predictions
-from resilience import safe_send_message, safe_send_photo, RATE_LIMIT_DELAY
+from resilience import safe_send_message, safe_send_message_with_result, safe_send_photo, safe_edit_message_text, RATE_LIMIT_DELAY
 from raffle import (
     send_raffle_announcement, send_raffle_reminder, handle_raffle_participation,
     save_user_answer, get_participants_by_question, approve_answer, deny_answer,
@@ -6000,18 +6000,44 @@ async def start_quiz_question(bot, user_id: int, quiz_date: str, question_num: i
         
         # Если есть message_id - редактируем сообщение, иначе отправляем новое
         if question_message_id:
-            try:
-                await bot.edit_message_text(
-                    chat_id=user_id,
-                    message_id=question_message_id,
-                    text=question_text,
-                    parse_mode="HTML",
-                    reply_markup=keyboard
+            # Пытаемся отредактировать сообщение с обработкой rate limiting
+            edit_success = await safe_edit_message_text(
+                bot,
+                chat_id=user_id,
+                message_id=question_message_id,
+                text=question_text,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+            
+            # Если редактирование не удалось, отправляем новое сообщение
+            if not edit_success:
+                logger.warning(f"Не удалось отредактировать сообщение {question_message_id}, отправляем новое")
+                message = await safe_send_message_with_result(
+                    bot, user_id, question_text, parse_mode="HTML", reply_markup=keyboard
                 )
-            except Exception as e:
-                logger.warning(f"Не удалось отредактировать сообщение {question_message_id}, отправляем новое: {e}")
-                message = await bot.send_message(user_id, question_text, parse_mode="HTML", reply_markup=keyboard)
-                # Обновляем message_id в БД
+                # Обновляем message_id в БД только если сообщение было отправлено
+                if message:
+                    async with AsyncSessionLocal() as session:
+                        result = await session.execute(
+                            select(QuizParticipant).where(
+                                and_(
+                                    QuizParticipant.user_id == user_id,
+                                    QuizParticipant.quiz_date == quiz_date
+                                )
+                            )
+                        )
+                        participant = result.scalar_one_or_none()
+                        if participant:
+                            participant.message_id = message.message_id
+                            await session.commit()
+        else:
+            # Отправляем новое сообщение с обработкой rate limiting
+            message = await safe_send_message_with_result(
+                bot, user_id, question_text, parse_mode="HTML", reply_markup=keyboard
+            )
+            # Сохраняем message_id в БД только если сообщение было отправлено
+            if message:
                 async with AsyncSessionLocal() as session:
                     result = await session.execute(
                         select(QuizParticipant).where(
@@ -6025,22 +6051,6 @@ async def start_quiz_question(bot, user_id: int, quiz_date: str, question_num: i
                     if participant:
                         participant.message_id = message.message_id
                         await session.commit()
-        else:
-            message = await bot.send_message(user_id, question_text, parse_mode="HTML", reply_markup=keyboard)
-            # Сохраняем message_id в БД
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(
-                    select(QuizParticipant).where(
-                        and_(
-                            QuizParticipant.user_id == user_id,
-                            QuizParticipant.quiz_date == quiz_date
-                        )
-                    )
-                )
-                participant = result.scalar_one_or_none()
-                if participant:
-                    participant.message_id = message.message_id
-                    await session.commit()
         
     except Exception as e:
         logger.error(f"Ошибка при запуске вопроса квиза: {e}", exc_info=True)

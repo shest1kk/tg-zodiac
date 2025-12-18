@@ -225,6 +225,152 @@ async def safe_send_message(
     return False
 
 
+async def safe_send_message_with_result(
+    bot: Bot,
+    user_id: int,
+    text: str,
+    parse_mode: Optional[str] = None,
+    max_retries: int = MAX_RETRIES,
+    **kwargs
+):
+    """
+    Безопасная отправка сообщения с retry механизмом, возвращает объект Message
+    
+    Returns:
+        Объект Message если сообщение отправлено успешно, None в противном случае
+    """
+    from aiogram.types import Message
+    
+    for attempt in range(max_retries + 1):
+        try:
+            message = await bot.send_message(
+                user_id,
+                text,
+                parse_mode=parse_mode,
+                **kwargs
+            )
+            return message
+            
+        except TelegramRetryAfter as e:
+            if attempt < max_retries:
+                wait_time = e.retry_after
+                logger.warning(f"Rate limit для пользователя {user_id}, ждем {wait_time} сек")
+                await asyncio.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"Превышен rate limit для пользователя {user_id} после {max_retries} попыток")
+                return None
+                
+        except TelegramForbiddenError:
+            logger.info(f"Пользователь {user_id} заблокировал бота")
+            return None
+            
+        except TelegramBadRequest as e:
+            error_msg = str(e).lower()
+            if 'chat not found' in error_msg or 'user is deactivated' in error_msg:
+                logger.info(f"Чат с пользователем {user_id} не найден или деактивирован")
+                return None
+            elif attempt < max_retries and is_retryable_telegram_error(e):
+                wait_time = RETRY_DELAY * (RETRY_BACKOFF ** attempt)
+                logger.warning(f"Ошибка Telegram API для {user_id} (попытка {attempt + 1}), повтор через {wait_time:.2f} сек: {e}")
+                await asyncio.sleep(min(wait_time, MAX_RETRY_DELAY))
+                continue
+            else:
+                logger.error(f"Неисправимая ошибка Telegram API для пользователя {user_id}: {e}")
+                return None
+                
+        except (TelegramNetworkError, TelegramServerError) as e:
+            if attempt < max_retries:
+                wait_time = RETRY_DELAY * (RETRY_BACKOFF ** attempt)
+                logger.warning(f"Сетевая/серверная ошибка для {user_id} (попытка {attempt + 1}), повтор через {wait_time:.2f} сек: {e}")
+                await asyncio.sleep(min(wait_time, MAX_RETRY_DELAY))
+                continue
+            else:
+                logger.error(f"Не удалось отправить сообщение пользователю {user_id} после {max_retries} попыток: {e}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при отправке сообщения пользователю {user_id}: {e}")
+            return None
+    
+    return None
+
+
+async def safe_edit_message_text(
+    bot: Bot,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    parse_mode: Optional[str] = None,
+    max_retries: int = MAX_RETRIES,
+    **kwargs
+) -> bool:
+    """
+    Безопасное редактирование сообщения с retry механизмом
+    
+    Returns:
+        True если сообщение отредактировано успешно, False в противном случае
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                parse_mode=parse_mode,
+                **kwargs
+            )
+            return True
+            
+        except TelegramRetryAfter as e:
+            if attempt < max_retries:
+                wait_time = e.retry_after
+                logger.warning(f"Rate limit для редактирования сообщения {message_id}, ждем {wait_time} сек")
+                await asyncio.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"Превышен rate limit для редактирования сообщения {message_id} после {max_retries} попыток")
+                return False
+                
+        except TelegramForbiddenError:
+            logger.info(f"Пользователь {chat_id} заблокировал бота")
+            return False
+            
+        except TelegramBadRequest as e:
+            error_msg = str(e).lower()
+            if 'chat not found' in error_msg or 'user is deactivated' in error_msg:
+                logger.info(f"Чат с пользователем {chat_id} не найден или деактивирован")
+                return False
+            elif 'message is not modified' in error_msg or 'message to edit not found' in error_msg:
+                # Эти ошибки не критичны, сообщение уже отредактировано или удалено
+                logger.debug(f"Сообщение {message_id} не может быть отредактировано: {e}")
+                return False
+            elif attempt < max_retries and is_retryable_telegram_error(e):
+                wait_time = RETRY_DELAY * (RETRY_BACKOFF ** attempt)
+                logger.warning(f"Ошибка Telegram API при редактировании (попытка {attempt + 1}), повтор через {wait_time:.2f} сек: {e}")
+                await asyncio.sleep(min(wait_time, MAX_RETRY_DELAY))
+                continue
+            else:
+                logger.error(f"Неисправимая ошибка Telegram API при редактировании сообщения {message_id}: {e}")
+                return False
+                
+        except (TelegramNetworkError, TelegramServerError) as e:
+            if attempt < max_retries:
+                wait_time = RETRY_DELAY * (RETRY_BACKOFF ** attempt)
+                logger.warning(f"Сетевая/серверная ошибка при редактировании (попытка {attempt + 1}), повтор через {wait_time:.2f} сек: {e}")
+                await asyncio.sleep(min(wait_time, MAX_RETRY_DELAY))
+                continue
+            else:
+                logger.error(f"Не удалось отредактировать сообщение {message_id} после {max_retries} попыток: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при редактировании сообщения {message_id}: {e}")
+            return False
+    
+    return False
+
+
 async def safe_send_photo(
     bot: Bot,
     user_id: int,

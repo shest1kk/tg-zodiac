@@ -286,7 +286,13 @@ async def update_quiz_question(
     username: str = Depends(get_current_user)
 ):
     """Обновить вопрос квиза"""
-    from quiz import update_quiz_question as update_question
+    from quiz import update_quiz_question as update_question, has_quiz_started
+    from scheduler import reschedule_quiz_jobs_if_running
+    
+    # Проверяем, не начался ли квиз
+    if await has_quiz_started(quiz_date):
+        raise HTTPException(status_code=400, detail="Нельзя редактировать вопрос в квизе, который уже начался")
+    
     try:
         question_text = data.get("question_text")
         options = data.get("options")
@@ -294,11 +300,109 @@ async def update_quiz_question(
         # Функция принимает параметры в порядке: question_id, quiz_date, question_text, options, correct_answer
         result = update_question(question_id, quiz_date, question_text, options, correct_answer)
         if result:
-            return {"success": True, "message": "Вопрос обновлен"}
+            # Автоматически обновляем scheduler
+            scheduled = reschedule_quiz_jobs_if_running(quiz_date)
+            return {"success": True, "message": "Вопрос обновлен", "scheduled": scheduled}
         else:
             raise HTTPException(status_code=404, detail="Вопрос не найден")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{quiz_date}/questions")
+async def add_quiz_question(
+    quiz_date: str,
+    data: dict = Body(...),
+    username: str = Depends(get_current_user)
+):
+    """Добавить вопрос к квизу"""
+    from quiz import load_all_quiz_data, save_quiz_data, has_quiz_started
+    from scheduler import reschedule_quiz_jobs_if_running
+    
+    # Проверяем, не начался ли квиз
+    if await has_quiz_started(quiz_date):
+        raise HTTPException(status_code=400, detail="Нельзя добавить вопрос в квиз, который уже начался")
+    
+    all_data = load_all_quiz_data()
+    if not all_data or "quiz_dates" not in all_data or quiz_date not in all_data["quiz_dates"]:
+        raise HTTPException(status_code=404, detail="Квиз не найден")
+    
+    quiz_data = all_data["quiz_dates"][quiz_date]
+    if "questions" not in quiz_data:
+        raise HTTPException(status_code=400, detail="Неверный формат квиза")
+    
+    questions = quiz_data["questions"]
+    question_id = data.get("question_id")
+    question_text = data.get("question_text")
+    options = data.get("options")
+    correct_answer = data.get("correct_answer")
+    
+    if not question_id or not question_text or not options or not correct_answer:
+        raise HTTPException(status_code=400, detail="Все поля обязательны")
+    
+    if str(question_id) in questions:
+        raise HTTPException(status_code=400, detail=f"Вопрос с ID {question_id} уже существует")
+    
+    # Проверяем, что есть 4 варианта ответа
+    for k in ("1", "2", "3", "4"):
+        if k not in options or not isinstance(options.get(k), str) or not options.get(k).strip():
+            raise HTTPException(status_code=400, detail=f"Вариант {k} обязателен")
+    
+    if str(correct_answer) not in ("1", "2", "3", "4"):
+        raise HTTPException(status_code=400, detail="correct_answer должен быть 1-4")
+    
+    questions[str(question_id)] = {
+        "id": question_id,
+        "question": question_text.strip(),
+        "options": {k: str(options[k]).strip() for k in ("1", "2", "3", "4")},
+        "correct_answer": str(correct_answer),
+    }
+    
+    if not save_quiz_data(all_data):
+        raise HTTPException(status_code=500, detail="Не удалось сохранить quiz.json")
+    
+    # Автоматически обновляем scheduler
+    scheduled = reschedule_quiz_jobs_if_running(quiz_date)
+    return {"success": True, "message": "Вопрос добавлен", "scheduled": scheduled}
+
+
+@router.delete("/{quiz_date}/questions/{question_id}")
+async def delete_quiz_question(
+    quiz_date: str,
+    question_id: int,
+    username: str = Depends(get_current_user)
+):
+    """Удалить вопрос из квиза"""
+    from quiz import load_all_quiz_data, save_quiz_data, has_quiz_started
+    from scheduler import reschedule_quiz_jobs_if_running
+    
+    # Проверяем, не начался ли квиз
+    if await has_quiz_started(quiz_date):
+        raise HTTPException(status_code=400, detail="Нельзя удалить вопрос из квиза, который уже начался")
+    
+    all_data = load_all_quiz_data()
+    if not all_data or "quiz_dates" not in all_data or quiz_date not in all_data["quiz_dates"]:
+        raise HTTPException(status_code=404, detail="Квиз не найден")
+    
+    quiz_data = all_data["quiz_dates"][quiz_date]
+    if "questions" not in quiz_data:
+        raise HTTPException(status_code=400, detail="Неверный формат квиза")
+    
+    questions = quiz_data["questions"]
+    if str(question_id) not in questions:
+        raise HTTPException(status_code=404, detail="Вопрос не найден")
+    
+    if len(questions) <= 1:
+        raise HTTPException(status_code=400, detail="Нельзя удалить последний вопрос")
+    
+    del questions[str(question_id)]
+    
+    if not save_quiz_data(all_data):
+        raise HTTPException(status_code=500, detail="Не удалось сохранить quiz.json")
+    
+    # Автоматически обновляем scheduler
+    scheduled = reschedule_quiz_jobs_if_running(quiz_date)
+    return {"success": True, "message": "Вопрос удален", "scheduled": scheduled}
 
 @router.get("/disabled-dates")
 async def get_disabled_dates(username: str = Depends(get_current_user)):
@@ -350,3 +454,26 @@ async def toggle_quiz_date(quiz_date: str, username: str = Depends(get_current_u
     
     return {"success": True, "message": f"Квиз для {quiz_date} {action}", "disabled": quiz_date not in disabled_dates}
 
+
+@router.delete("/{quiz_date}")
+async def delete_quiz(quiz_date: str, username: str = Depends(get_current_user)):
+    """Удалить квиз"""
+    from quiz import load_all_quiz_data, save_quiz_data, has_quiz_started
+    
+    # Проверяем, не начался ли квиз
+    if await has_quiz_started(quiz_date):
+        raise HTTPException(status_code=400, detail="Нельзя удалить квиз, который уже начался")
+    
+    all_data = load_all_quiz_data()
+    if not all_data or "quiz_dates" not in all_data:
+        raise HTTPException(status_code=404, detail="Квиз не найден")
+    
+    if quiz_date not in all_data["quiz_dates"]:
+        raise HTTPException(status_code=404, detail="Квиз не найден")
+    
+    del all_data["quiz_dates"][quiz_date]
+    
+    if not save_quiz_data(all_data):
+        raise HTTPException(status_code=500, detail="Не удалось сохранить quiz.json")
+    
+    return {"success": True, "message": f"Квиз {quiz_date} удален"}
