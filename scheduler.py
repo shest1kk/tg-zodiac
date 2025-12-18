@@ -332,6 +332,116 @@ def reschedule_raffle_jobs_if_running(raffle_date: str) -> bool:
     return True
 
 
+async def send_dice_announcements_for_dice_id(dice_id: str):
+    """Отправляет объявления о dice всем подписанным пользователям для конкретного события"""
+    if not bot:
+        logger.error("Бот не установлен для отправки объявлений dice")
+        return
+    
+    try:
+        from dice import send_dice_announcement, get_dice_event
+        event = get_dice_event(dice_id)
+        if not event or not event.get("enabled", True):
+            logger.info(f"Событие dice {dice_id} отключено или не найдено, пропускаю отправку")
+            return
+        
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User).where(User.subscribed == True)
+            )
+            users = result.scalars().all()
+        
+        success_count = 0
+        error_count = 0
+        
+        for user in users:
+            try:
+                message_id = await send_dice_announcement(bot, user.id, dice_id)
+                if message_id:
+                    success_count += 1
+                else:
+                    error_count += 1
+            except Exception as e:
+                logger.error(f"Ошибка при отправке объявления dice пользователю {user.id}: {e}")
+                error_count += 1
+        
+        logger.info(f"✅ Отправлено объявлений dice {dice_id}: {success_count} успешно, {error_count} ошибок")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке объявлений dice {dice_id}: {e}", exc_info=True)
+
+
+def _schedule_dice_jobs_for_dice_id(dice_id: str):
+    """Планирует объявление для конкретного события dice.
+    
+    Время берётся из starts_at в data/dice.json.
+    """
+    global scheduler
+    if scheduler is None:
+        return
+    
+    try:
+        from dice import get_dice_event, get_dice_start_datetime_moscow
+        event = get_dice_event(dice_id)
+        if not event:
+            logger.warning(f"Событие dice {dice_id} не найдено, пропускаю планирование")
+            return
+        
+        if not event.get("enabled", True):
+            logger.info(f"⏭️ Событие dice {dice_id} отключено, пропускаю планирование")
+            return
+        
+        starts_at_moscow = get_dice_start_datetime_moscow(dice_id)
+        if not starts_at_moscow:
+            logger.warning(f"Не удалось получить starts_at для dice {dice_id}, пропускаю")
+            return
+        
+        now_utc = datetime.now(timezone.utc)
+        announcement_datetime = starts_at_moscow.astimezone(timezone.utc)
+        
+        if announcement_datetime > now_utc:
+            scheduler.add_job(
+                send_dice_announcements_for_dice_id,
+                "date",
+                run_date=announcement_datetime,
+                id=f"dice_announcements_{dice_id}",
+                replace_existing=True,
+                args=[dice_id]
+            )
+            logger.info(f"✅ Запланировано объявление dice {dice_id} на {starts_at_moscow.strftime('%Y-%m-%d %H:%M')} МСК")
+        else:
+            logger.info(f"⏭️ Время объявления dice {dice_id} уже прошло, пропускаю планирование")
+    except Exception as e:
+        logger.error(f"Ошибка при планировании dice {dice_id}: {e}", exc_info=True)
+
+
+def _schedule_all_dice_from_json():
+    """Планирует все события dice, которые есть в data/dice.json."""
+    try:
+        from dice import get_all_dice_events
+        dice_ids = get_all_dice_events()
+        # Сортируем по ID на всякий случай
+        for dice_id in sorted(dice_ids):
+            _schedule_dice_jobs_for_dice_id(dice_id)
+    except Exception as e:
+        logger.error(f"Ошибка при планировании dice из dice.json: {e}", exc_info=True)
+
+
+def reschedule_dice_jobs_if_running(dice_id: str) -> bool:
+    """Удаляет и пересоздаёт задачи конкретного dice (если scheduler запущен)."""
+    global scheduler
+    if not scheduler or not getattr(scheduler, "running", False):
+        return False
+    
+    for job_id in (f"dice_announcements_{dice_id}",):
+        try:
+            scheduler.remove_job(job_id)
+        except Exception:
+            pass
+    
+    _schedule_dice_jobs_for_dice_id(dice_id)
+    return True
+
+
 def load_predictions():
     """Загружает данные предсказаний из файла (синхронная версия для обратной совместимости)"""
     predictions_path = Path("data/predictions.json")
@@ -579,6 +689,9 @@ def start_scheduler():
     
     # Планировщик для розыгрышей: из question.json (с метаданными) или из констант
     _schedule_all_raffles_from_json()
+    
+    # Планировщик для dice: из dice.json
+    _schedule_all_dice_from_json()
     
     # Старый код для обратной совместимости (если розыгрыши не в question.json)
     # Планировщик для розыгрышей: конкретные даты в указанное время МСК (конвертируется в UTC)

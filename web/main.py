@@ -11,7 +11,7 @@ from pathlib import Path
 import secrets
 
 from web.auth import get_current_user, verify_login
-from web.routes import tickets, users, quiz, raffle, stats, scheduler as scheduler_routes
+from web.routes import tickets, users, quiz, raffle, stats, scheduler as scheduler_routes, dice
 
 # Глобальные переменные для доступа к боту и dispatcher
 bot_instance = None
@@ -61,6 +61,7 @@ app.include_router(tickets.router, prefix="/api/tickets", tags=["tickets"])
 app.include_router(users.router, prefix="/api/users", tags=["users"])
 app.include_router(quiz.router, prefix="/api/quiz", tags=["quiz"])
 app.include_router(raffle.router, prefix="/api/raffle", tags=["raffle"])
+app.include_router(dice.router, prefix="/api/dice", tags=["dice"])
 app.include_router(stats.router, prefix="/api/stats", tags=["stats"])
 app.include_router(scheduler_routes.router, prefix="/api/scheduler", tags=["scheduler"])
 

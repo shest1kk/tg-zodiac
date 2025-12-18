@@ -1307,6 +1307,78 @@ def create_raffle_data(raffle_date: str, starts_at_local: str, title: str, quest
         return {"success": False, "error": str(e)}
 
 
+def duplicate_raffle_from_local(source_raffle_date: str, starts_at_local: str, title: str) -> Dict:
+    """Дублирует розыгрыш с новой датой/временем и заголовком, копируя вопросы."""
+    if not isinstance(source_raffle_date, str) or not source_raffle_date.strip():
+        return {"success": False, "error": "source_raffle_date обязателен"}
+    if not isinstance(title, str) or not title.strip():
+        return {"success": False, "error": "Заголовок обязателен"}
+    if not isinstance(starts_at_local, str) or not starts_at_local.strip():
+        return {"success": False, "error": "Дата/время обязательны"}
+
+    try:
+        starts_at_dt = datetime.fromisoformat(starts_at_local.strip())
+        if starts_at_dt.tzinfo is not None:
+            starts_at_dt = starts_at_dt.astimezone(MOSCOW_TZ)
+        else:
+            starts_at_dt = starts_at_dt.replace(tzinfo=MOSCOW_TZ)
+        starts_at_dt = starts_at_dt.astimezone(MOSCOW_TZ)
+    except Exception:
+        return {"success": False, "error": "Неверный формат даты/времени (ожидается YYYY-MM-DDTHH:MM)"}
+
+    target_raffle_date = starts_at_dt.date().strftime("%Y-%m-%d")
+
+    questions_data = load_questions()
+    if not questions_data:
+        questions_data = {"raffle_dates": {}}
+    if "raffle_dates" not in questions_data:
+        questions_data["raffle_dates"] = {}
+
+    raffle_dates = questions_data["raffle_dates"]
+    if source_raffle_date not in raffle_dates:
+        return {"success": False, "error": "Исходный розыгрыш не найден"}
+    if target_raffle_date in raffle_dates:
+        return {"success": False, "error": f"Розыгрыш на дату {target_raffle_date} уже существует"}
+
+    # Берём вопросы из source
+    source_entry = raffle_dates[source_raffle_date]
+    if isinstance(source_entry, dict) and "questions" in source_entry:
+        source_questions = source_entry.get("questions") or {}
+    else:
+        # Старый формат - конвертируем
+        source_questions = source_entry if isinstance(source_entry, dict) else {}
+    
+    if not source_questions:
+        return {"success": False, "error": "В исходном розыгрыше нет вопросов"}
+
+    # Копируем вопросы
+    questions_dict = {}
+    for k, q in source_questions.items():
+        if isinstance(q, dict):
+            questions_dict[k] = {
+                "id": q.get("id", int(k) if k.isdigit() else 0),
+                "title": q.get("title", ""),
+                "text": q.get("text", "")
+            }
+
+    if not questions_dict:
+        return {"success": False, "error": "В исходном розыгрыше нет вопросов"}
+
+    # Создаем новый розыгрыш с метаданными
+    raffle_dates[target_raffle_date] = {
+        "meta": {
+            "title": title.strip(),
+            "starts_at": starts_at_dt.isoformat(),
+        },
+        "questions": questions_dict,
+    }
+
+    if not save_questions_data(questions_data):
+        return {"success": False, "error": "Не удалось сохранить question.json"}
+
+    return {"success": True, "raffle_date": target_raffle_date}
+
+
 async def delete_raffle(raffle_date: str) -> Dict:
     """Удаляет розыгрыш (вопросы и метаданные)
     

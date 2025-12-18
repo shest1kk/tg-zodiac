@@ -246,6 +246,28 @@ async def create_raffle(
     return {"success": True, "raffle_date": raffle_date, "scheduled": scheduled}
 
 
+@router.post("/duplicate")
+async def duplicate_raffle(
+    data: dict = Body(...),
+    username: str = Depends(get_current_user)
+):
+    """Дублировать розыгрыш на новую дату/время, копируя вопросы."""
+    from raffle import duplicate_raffle_from_local
+    from scheduler import schedule_raffle_jobs_if_running
+
+    source_raffle_date = data.get("source_raffle_date")
+    starts_at_local = data.get("starts_at_local")
+    title = data.get("title")
+
+    result = duplicate_raffle_from_local(source_raffle_date, starts_at_local, title)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "Ошибка")
+
+    raffle_date = result["raffle_date"]
+    scheduled = schedule_raffle_jobs_if_running(raffle_date)
+    return {"success": True, "raffle_date": raffle_date, "scheduled": scheduled}
+
+
 @router.put("/{raffle_date}/meta")
 async def update_raffle_meta(
     raffle_date: str,

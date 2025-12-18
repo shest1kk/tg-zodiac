@@ -38,6 +38,10 @@ from quiz import (
     update_quiz_question, has_quiz_started, get_quiz,
     QUIZ_HOUR, QUIZ_MINUTE
 )
+from dice import (
+    send_dice_announcement, handle_dice_start, handle_dice_number, handle_dice_result,
+    dice_waiting_responses
+)
 
 bot = Bot(TG_TOKEN)
 storage = MemoryStorage()
@@ -5635,6 +5639,126 @@ async def cmd_weekly_report(message: types.Message):
         logger.error(f"Ошибка при формировании еженедельного отчета: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка: {e}")
 
+
+@dp.callback_query(F.data.startswith("dice_start_"))
+async def handle_dice_start_callback(cb: types.CallbackQuery):
+    """Обработчик нажатия кнопки 'Давай' в объявлении dice"""
+    try:
+        user_id = cb.from_user.id
+        dice_id = cb.data.replace("dice_start_", "")
+        message_id = cb.message.message_id if cb.message else None
+        
+        if not message_id:
+            await cb.answer("❌ Ошибка: не удалось получить ID сообщения", show_alert=True)
+            return
+        
+        await cb.answer()
+        
+        success = await handle_dice_start(bot, user_id, dice_id, message_id)
+        if not success:
+            await safe_send_message(bot, user_id, "❌ Ошибка при обработке запроса")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при обработке callback dice_start: {e}", exc_info=True)
+        await cb.answer("❌ Произошла ошибка", show_alert=True)
+
+
+async def _process_dice_result(message: types.Message, is_edited: bool = False):
+    """Обрабатывает результат dice - сравнивает с загаданным числом и выдает билетик если совпало"""
+    try:
+        # Для dice сообщений от бота from_user может быть None, используем chat.id
+        if not message.chat:
+            return
+        
+        user_id = message.chat.id
+        
+        # Только личные сообщения
+        if message.chat.type != "private":
+            return
+        
+        # Проверяем, что это dice с эмодзи кубика
+        if not message.dice or message.dice.emoji != "🎲":
+            return
+        
+        message_id = message.message_id
+        dice_value = message.dice.value
+        
+        # Если dice еще анимируется (value = None), игнорируем
+        if dice_value is None:
+            logger.debug(f"Dice для пользователя {user_id} еще анимируется (message_id: {message_id})")
+            return
+        
+        # Результат пришел!
+        logger.info(f"🎲 Результат dice получен: user_id={user_id}, message_id={message_id}, value={dice_value}")
+        
+        # Проверяем, ожидает ли пользователь результата
+        from dice import dice_waiting_responses
+        if user_id not in dice_waiting_responses:
+            logger.debug(f"Пользователь {user_id} не в списке ожидающих")
+            return
+        
+        user_data = dice_waiting_responses[user_id]
+        expected_number = user_data.get("expected_number")
+        saved_dice_message_id = user_data.get("dice_message_id")
+        
+        # Проверяем, что это dice от бота (по message_id)
+        if saved_dice_message_id is None or message_id != saved_dice_message_id:
+            logger.debug(f"Игнорируем dice: message_id {message_id} != {saved_dice_message_id}")
+            return
+        
+        if expected_number is None:
+            logger.debug(f"Пользователь {user_id} еще не загадал число")
+            return
+        
+        # Удаляем из ожидающих ПЕРЕД обработкой
+        del dice_waiting_responses[user_id]
+        
+        # СРАВНИВАЕМ: загаданное число vs результат dice
+        logger.info(f"Сравниваем: загадал {expected_number}, выпало {dice_value}")
+        
+        if dice_value == expected_number:
+            # ПОБЕДА! Выдаем билетик
+            from dice import handle_dice_result
+            await handle_dice_result(bot, user_id, dice_value, message_id)
+        else:
+            # Не совпало
+            message_text = (
+                f"😔 <b>Не повезло</b>\n\n"
+                f"Ты загадал число <b>{expected_number}</b>, а выпало <b>{dice_value}</b>.\n"
+                f"Попробуй в следующий раз!"
+            )
+            await safe_send_message(bot, user_id, message_text, parse_mode="HTML")
+            logger.info(f"Пользователь {user_id} не угадал: загадал {expected_number}, выпало {dice_value}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обработке результата dice: {e}", exc_info=True)
+
+
+@dp.message(F.dice)
+async def handle_dice_message(message: types.Message):
+    """Обработчик результата dice (кубика) - новое сообщение"""
+    logger.info(f"📨📨📨 MESSAGE с dice: message_id={message.message_id}, chat_id={message.chat.id if message.chat else None}, chat_type={message.chat.type if message.chat else None}, from_user_id={message.from_user.id if message.from_user else None}, value={message.dice.value if message.dice else None}")
+    await _process_dice_result(message, is_edited=False)
+
+
+@dp.edited_message()
+async def handle_edited_message(message: types.Message):
+    """Обработчик всех отредактированных сообщений - проверяем dice"""
+    # Логируем ВСЕ edited_message для отладки
+    logger.info(f"📝📝📝 EDITED_MESSAGE получено: message_id={message.message_id}, chat_id={message.chat.id if message.chat else None}, chat_type={message.chat.type if message.chat else None}, from_user_id={message.from_user.id if message.from_user else None}, has_dice={message.dice is not None}, dice_emoji={message.dice.emoji if message.dice else None}, dice_value={message.dice.value if message.dice else None}")
+    
+    # Проверяем, есть ли dice в сообщении
+    if message.dice:
+        logger.info(f"🎲 EDITED_MESSAGE содержит dice: emoji={message.dice.emoji}, value={message.dice.value}")
+        if message.dice.emoji == "🎲":
+            logger.info(f"🎲🎲🎲 EDITED_MESSAGE с кубиком: message_id={message.message_id}, value={message.dice.value}, chat_id={message.chat.id if message.chat else None}")
+            await _process_dice_result(message, is_edited=True)
+        else:
+            logger.debug(f"EDITED_MESSAGE с dice, но не кубик: emoji={message.dice.emoji}")
+    else:
+        logger.debug(f"EDITED_MESSAGE без dice: message_id={message.message_id}")
+
+
 @dp.message()
 async def handle_unknown(message: types.Message, state: FSMContext):
     """Обработчик неизвестных команд и сообщений"""
@@ -5643,6 +5767,21 @@ async def handle_unknown(message: types.Message, state: FSMContext):
     if current_state:
         # Если есть состояние FSM, не обрабатываем здесь - FSM обработчики имеют приоритет
         return
+    
+    # Проверяем, ожидает ли пользователь ответа для dice
+    user_id = message.from_user.id
+    if user_id in dice_waiting_responses:
+        # Пользователь ожидает ответа для dice
+        if message.text:
+            try:
+                number = int(message.text.strip())
+                if 1 <= number <= 6:
+                    # Это валидное число для dice
+                    success = await handle_dice_number(bot, user_id, number)
+                    if success:
+                        return  # Обработано, не продолжаем дальше
+            except ValueError:
+                pass  # Не число, продолжаем обработку
     
     # Сбрасываем флаг режима вопроса при любой команде
     if message.text and message.text.startswith("/"):
@@ -6372,7 +6511,15 @@ async def main():
             logger.warning(f"⚠️ Не удалось запустить веб-сервер: {e}", exc_info=True)
         
         logger.info("🤖 Бот запущен и готов к работе!")
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        # Включаем edited_message в allowed_updates для обработки результатов dice
+        allowed_updates = dp.resolve_used_update_types()
+        if "edited_message" not in allowed_updates:
+            allowed_updates.append("edited_message")
+        # Также добавляем message на случай, если результат приходит через обычный message update
+        if "message" not in allowed_updates:
+            allowed_updates.append("message")
+        logger.info(f"Запуск polling с allowed_updates: {allowed_updates}")
+        await dp.start_polling(bot, allowed_updates=allowed_updates)
     except KeyboardInterrupt:
         logger.info("Получен сигнал остановки, завершаем работу...")
     except Exception as e:

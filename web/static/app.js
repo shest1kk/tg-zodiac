@@ -149,6 +149,9 @@ async function loadPage(page) {
             case 'raffle':
                 await loadRaffle();
                 break;
+            case 'dice':
+                await loadDice();
+                break;
             case 'stats':
                 await loadStats();
                 break;
@@ -1246,6 +1249,9 @@ async function loadRaffle() {
                             <button class="btn btn-sm ${isDisabled ? 'btn-success' : 'btn-warning'}" onclick="event.stopPropagation(); toggleRaffleDate('${date}'); return false;">
                                 ${isDisabled ? '✅ Включить' : '⏸️ Отключить'}
                             </button>
+                            <button class="btn btn-sm btn-danger ms-1" onclick="event.stopPropagation(); deleteRaffle('${date}'); return false;">
+                                🗑 Удалить
+                            </button>
                         </div>
                     </div>
                 `;
@@ -1357,7 +1363,8 @@ async function showRaffleDetails(raffleDate) {
             <button class="btn btn-secondary mb-3" onclick="loadRaffle()">◀️ Назад к списку</button>
             <div class="btn-group mb-3" role="group">
                 <button class="btn btn-outline-primary" onclick="editRaffleMeta('${raffleDate}')">✏️ Мета</button>
-                <button class="btn btn-outline-danger" onclick="deleteRaffle('${raffleDate}')">🗑 Удалить</button>
+                <button class="btn btn-outline-secondary" onclick="duplicateRaffle('${raffleDate}')">📋 Дублировать</button>
+                <button class="btn btn-outline-info" onclick="previewRaffle('${raffleDate}')">👀 Превью</button>
                 <button class="btn btn-outline-dark" onclick="rescheduleRaffleJobs('${raffleDate}')">🔁 Перепланировать</button>
             </div>
             
@@ -1560,6 +1567,142 @@ async function deleteRaffle(raffleDate) {
         loadRaffle();
     } catch (e) {
         // toast already
+    }
+}
+
+async function duplicateRaffle(raffleDate) {
+    try {
+        const meta = await apiFetch(`/raffle/${raffleDate}/meta`);
+        const currentTitle = meta.title || '';
+        const defaultTitle = currentTitle ? `${currentTitle} (копия)` : 'Розыгрыш (копия)';
+
+        const modalHtml = `
+            <div class="modal fade" id="duplicateRaffleModal" tabindex="-1">
+                <div class="modal-dialog">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">📋 Дублировать розыгрыш ${escapeHtml(raffleDate)}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <form id="duplicateRaffleForm">
+                                <div class="mb-3">
+                                    <label class="form-label">Новая дата и время (МСК)</label>
+                                    <input type="datetime-local" class="form-control" id="drStartsAt" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Заголовок</label>
+                                    <input type="text" class="form-control" id="drTitle" value="${escapeHtml(defaultTitle)}" required>
+                                </div>
+                            </form>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                            <button type="button" class="btn btn-primary" onclick="saveDuplicateRaffle('${raffleDate}')">💾 Создать копию</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const existing = document.getElementById('duplicateRaffleModal');
+        if (existing) existing.remove();
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const bsModal = new bootstrap.Modal(document.getElementById('duplicateRaffleModal'));
+        bsModal.show();
+        document.getElementById('duplicateRaffleModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    } catch (e) {
+        toastError(e.message || 'Не удалось открыть форму дублирования');
+    }
+}
+
+async function saveDuplicateRaffle(sourceRaffleDate) {
+    const form = document.getElementById('duplicateRaffleForm');
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+    const startsAt = document.getElementById('drStartsAt').value;
+    const title = document.getElementById('drTitle').value.trim();
+    try {
+        const resp = await apiAction(`/raffle/duplicate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_raffle_date: sourceRaffleDate, starts_at_local: startsAt, title })
+        });
+        toastSuccess(`Розыгрыш продублирован на дату ${resp.raffle_date}${resp.scheduled ? ' (задачи обновлены)' : ''}`);
+        const modal = bootstrap.Modal.getInstance(document.getElementById('duplicateRaffleModal'));
+        if (modal) modal.hide();
+        await showRaffleDetails(resp.raffle_date);
+    } catch (e) {
+        // toast already
+    }
+}
+
+async function previewRaffle(raffleDate) {
+    try {
+        const [meta, questions] = await Promise.all([
+            apiFetch(`/raffle/${raffleDate}/meta`),
+            apiFetch(`/raffle/${raffleDate}/questions`)
+        ]);
+        
+        const title = meta.title || 'Без заголовка';
+        const startsAt = meta.starts_at_msk ? `Начало: ${escapeHtml(meta.starts_at_msk)} МСК` : 'Дата не указана';
+        
+        let questionsHtml = '';
+        if (questions.questions && questions.questions.length > 0) {
+            questionsHtml = questions.questions.map((q, idx) => {
+                const questionId = q.id || (idx + 1);
+                const questionTitle = q.title || 'Без названия';
+                const questionText = q.text || q.question_text || 'Нет текста';
+                return `
+                    <div class="card mb-2">
+                        <div class="card-body">
+                            <h6>Вопрос #${questionId}: ${escapeHtml(questionTitle)}</h6>
+                            <p>${escapeHtml(questionText)}</p>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        } else {
+            questionsHtml = '<p class="text-muted">Вопросы не найдены</p>';
+        }
+        
+        const modalHtml = `
+            <div class="modal fade" id="previewRaffleModal" tabindex="-1">
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">👀 Превью розыгрыша ${escapeHtml(raffleDate)}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <h5>${escapeHtml(title)}</h5>
+                            <p class="text-muted">${startsAt}</p>
+                            <hr>
+                            <h6>Вопросы:</h6>
+                            ${questionsHtml}
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        const existing = document.getElementById('previewRaffleModal');
+        if (existing) existing.remove();
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const bsModal = new bootstrap.Modal(document.getElementById('previewRaffleModal'));
+        bsModal.show();
+        document.getElementById('previewRaffleModal').addEventListener('hidden.bs.modal', function() {
+            this.remove();
+        });
+    } catch (e) {
+        toastError(e.message || 'Не удалось построить превью');
     }
 }
 
@@ -2439,5 +2582,267 @@ async function loadStats() {
             </div>
         </div>
     `;
+}
+
+// ==================== DICE (Кубик) ====================
+
+async function loadDice() {
+    const diceListData = await apiFetch('/dice/list');
+    
+    const content = document.getElementById('content');
+    content.innerHTML = `
+        <h2>🎲 Кубик</h2>
+        <div class="card mb-3">
+            <div class="card-body">
+                <div class="input-group">
+                    <span class="input-group-text">🔎</span>
+                    <input type="text" class="form-control" id="diceSearch" placeholder="Поиск по ID или заголовку...">
+                </div>
+            </div>
+        </div>
+        <div class="list-group" id="dice-list">
+            ${(diceListData.dice_events || []).map(item => {
+                const diceId = item.dice_id;
+                const title = item.title ? ` — <span class="text-muted">${escapeHtml(item.title)}</span>` : '';
+                const startsAt = item.starts_at_msk ? `<small class="text-muted">(${escapeHtml(item.starts_at_msk)} МСК)</small>` : '';
+                const isDisabled = !item.enabled;
+                return `
+                    <div class="list-group-item d-flex justify-content-between align-items-center" data-dice-item="1" data-dice-id="${escapeHtml(diceId)}" data-dice-title="${escapeHtml(item.title || '')}">
+                        <a href="#" class="flex-grow-1 text-decoration-none dice-id-link" data-dice-id="${diceId}">
+                            <div>
+                                <strong>${diceId}</strong>${title}
+                                ${isDisabled ? '<span class="badge bg-danger ms-2">Отключен</span>' : ''}
+                            </div>
+                            <div>${startsAt}</div>
+                        </a>
+                        <div>
+                            <button class="btn btn-sm ${isDisabled ? 'btn-success' : 'btn-warning'}" onclick="event.stopPropagation(); toggleDice('${diceId}'); return false;">
+                                ${isDisabled ? '✅ Включить' : '⏸️ Отключить'}
+                            </button>
+                            <button class="btn btn-sm btn-danger ms-1" onclick="event.stopPropagation(); deleteDice('${diceId}'); return false;">
+                                🗑️ Удалить
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('')}
+        </div>
+        <div class="mt-3">
+            <button class="btn btn-success" onclick="showCreateDiceForm()">➕ Добавить событие</button>
+        </div>
+    `;
+    
+    // Обработчики для событий dice
+    const diceListEl = document.getElementById('dice-list');
+    if (diceListEl) {
+        diceListEl.addEventListener('click', async (e) => {
+            const link = e.target.closest('.dice-id-link');
+            if (link) {
+                e.preventDefault();
+                e.stopPropagation();
+                const diceId = link.dataset.diceId;
+                await showDiceDetails(diceId);
+            }
+        });
+    }
+
+    const searchEl = document.getElementById('diceSearch');
+    if (searchEl) {
+        searchEl.addEventListener('input', () => {
+            const q = (searchEl.value || '').trim().toLowerCase();
+            const items = document.querySelectorAll('[data-dice-item="1"]');
+            items.forEach(it => {
+                const d = (it.getAttribute('data-dice-id') || '').toLowerCase();
+                const t = (it.getAttribute('data-dice-title') || '').toLowerCase();
+                const ok = !q || d.includes(q) || t.includes(q);
+                it.style.display = ok ? '' : 'none';
+            });
+        });
+    }
+}
+
+async function showDiceDetails(diceId) {
+    try {
+        const diceData = await apiFetch(`/dice/${diceId}`);
+        
+        const content = document.getElementById('content');
+        const title = diceData.title ? ` — ${escapeHtml(diceData.title)}` : '';
+        const startsAt = diceData.starts_at_msk ? `<p class="text-muted mb-1">🕒 Начало: <strong>${escapeHtml(diceData.starts_at_msk)}</strong> МСК</p>` : '';
+        const enabledBadge = diceData.enabled ? '<span class="badge bg-success">Включен</span>' : '<span class="badge bg-danger">Отключен</span>';
+        
+        content.innerHTML = `
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2>🎲 ${escapeHtml(diceId)}${title}</h2>
+                <div>
+                    <button class="btn btn-secondary" onclick="loadDice()">← Назад</button>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-body">
+                    <h5>Информация</h5>
+                    <p><strong>ID:</strong> ${escapeHtml(diceId)}</p>
+                    <p><strong>Заголовок:</strong> ${escapeHtml(diceData.title || '-')}</p>
+                    ${startsAt}
+                    <p><strong>Статус:</strong> ${enabledBadge}</p>
+                    <div class="mt-3">
+                        <button class="btn btn-primary" onclick="editDiceMeta('${diceId}')">✏️ Редактировать</button>
+                        <button class="btn btn-warning ms-2" onclick="toggleDice('${diceId}')">
+                            ${diceData.enabled ? '⏸️ Отключить' : '✅ Включить'}
+                        </button>
+                        <button class="btn btn-danger ms-2" onclick="deleteDice('${diceId}')">🗑️ Удалить</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    } catch (error) {
+        toastError(error.message || 'Ошибка при загрузке деталей события');
+    }
+}
+
+function showCreateDiceForm() {
+    const content = document.getElementById('content');
+    content.innerHTML = `
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2>➕ Создать событие Dice</h2>
+            <button class="btn btn-secondary" onclick="loadDice()">← Назад</button>
+        </div>
+        <div class="card">
+            <div class="card-body">
+                <form id="createDiceForm">
+                    <div class="mb-3">
+                        <label for="diceId" class="form-label">ID события *</label>
+                        <input type="text" class="form-control" id="diceId" required placeholder="например: dice_2025_12_20">
+                        <small class="form-text text-muted">Уникальный идентификатор события</small>
+                    </div>
+                    <div class="mb-3">
+                        <label for="diceTitle" class="form-label">Заголовок *</label>
+                        <input type="text" class="form-control" id="diceTitle" required placeholder="например: Проверка удачи">
+                    </div>
+                    <div class="mb-3">
+                        <label for="diceStartsAt" class="form-label">Дата и время начала (МСК) *</label>
+                        <input type="datetime-local" class="form-control" id="diceStartsAt" required>
+                    </div>
+                    <div class="mt-3">
+                        <button type="submit" class="btn btn-success">✅ Создать</button>
+                        <button type="button" class="btn btn-secondary" onclick="loadDice()">Отмена</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+    
+    document.getElementById('createDiceForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const diceId = document.getElementById('diceId').value.trim();
+        const title = document.getElementById('diceTitle').value.trim();
+        const startsAt = document.getElementById('diceStartsAt').value;
+        
+        if (!diceId || !title || !startsAt) {
+            toastError('Заполните все поля');
+            return;
+        }
+        
+        try {
+            await apiAction('/dice/create', {
+                method: 'POST',
+                body: JSON.stringify({
+                    dice_id: diceId,
+                    title: title,
+                    starts_at_local: startsAt
+                })
+            }, { successMessage: 'Событие создано' });
+            await loadDice();
+        } catch (error) {
+            // Ошибка уже обработана в apiAction
+        }
+    });
+}
+
+async function editDiceMeta(diceId) {
+    try {
+        const diceData = await apiFetch(`/dice/${diceId}`);
+        
+        const content = document.getElementById('content');
+        content.innerHTML = `
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2>✏️ Редактировать событие</h2>
+                <button class="btn btn-secondary" onclick="showDiceDetails('${diceId}')">← Назад</button>
+            </div>
+            <div class="card">
+                <div class="card-body">
+                    <form id="editDiceForm">
+                        <div class="mb-3">
+                            <label for="editDiceTitle" class="form-label">Заголовок *</label>
+                            <input type="text" class="form-control" id="editDiceTitle" value="${escapeHtml(diceData.title || '')}" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="editDiceStartsAt" class="form-label">Дата и время начала (МСК) *</label>
+                            <input type="datetime-local" class="form-control" id="editDiceStartsAt" value="${diceData.starts_at_msk ? diceData.starts_at_msk.replace(' ', 'T') : ''}" required>
+                        </div>
+                        <div class="mt-3">
+                            <button type="submit" class="btn btn-primary">💾 Сохранить</button>
+                            <button type="button" class="btn btn-secondary" onclick="showDiceDetails('${diceId}')">Отмена</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        `;
+        
+        document.getElementById('editDiceForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const title = document.getElementById('editDiceTitle').value.trim();
+            const startsAt = document.getElementById('editDiceStartsAt').value;
+            
+            if (!title || !startsAt) {
+                toastError('Заполните все поля');
+                return;
+            }
+            
+            try {
+                await apiAction(`/dice/${diceId}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({
+                        title: title,
+                        starts_at_local: startsAt
+                    })
+                }, { successMessage: 'Событие обновлено' });
+                await showDiceDetails(diceId);
+            } catch (error) {
+                // Ошибка уже обработана в apiAction
+            }
+        });
+    } catch (error) {
+        toastError(error.message || 'Ошибка при загрузке данных');
+    }
+}
+
+async function toggleDice(diceId) {
+    if (!confirm(`Вы уверены, что хотите ${document.querySelector(`[data-dice-id="${diceId}"]`)?.querySelector('.btn-warning, .btn-success')?.textContent.includes('Отключить') ? 'отключить' : 'включить'} это событие?`)) {
+        return;
+    }
+    
+    try {
+        await apiAction(`/dice/${diceId}/toggle`, {
+            method: 'POST'
+        }, { successMessage: 'Статус изменен' });
+        await loadDice();
+    } catch (error) {
+        // Ошибка уже обработана в apiAction
+    }
+}
+
+async function deleteDice(diceId) {
+    if (!confirm(`Вы уверены, что хотите удалить событие "${diceId}"? Это действие нельзя отменить.`)) {
+        return;
+    }
+    
+    try {
+        await apiAction(`/dice/${diceId}`, {
+            method: 'DELETE'
+        }, { successMessage: 'Событие удалено' });
+        await loadDice();
+    } catch (error) {
+        // Ошибка уже обработана в apiAction
+    }
 }
 
