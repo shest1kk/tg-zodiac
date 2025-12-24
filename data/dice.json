@@ -1,3 +1,16 @@
 {
-    "dice_events": {}
+    "dice_events": {
+        "1": {
+            "dice_id": "1",
+            "title": "Кубик",
+            "starts_at": "2025-12-19T11:00:00+03:00",
+            "enabled": true
+        },
+        "2": {
+            "dice_id": "2",
+            "title": "Кубик",
+            "starts_at": "2025-12-24T13:00:00+03:00",
+            "enabled": true
+        }
+    }
 }

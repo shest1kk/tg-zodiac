@@ -273,10 +273,11 @@ async def cmd_my_info(message: types.Message):
             
             zodiac_name = user.zodiac_name or (ZODIAC_NAMES.get(user.zodiac) if user.zodiac else "Не выбран")
             subscribed_status = "✅ Подписан" if user.subscribed else "❌ Не подписан"
+            registration_status = "✅ Завершена" if user.registration_completed else "❌ Не завершена"
             created_at_str = user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else "Неизвестно"
             
             # Получаем билетики из квизов
-            tickets_result = await session.execute(
+            quiz_tickets_result = await session.execute(
                 select(QuizResult).where(
                     and_(
                         QuizResult.user_id == user.id,
@@ -284,23 +285,43 @@ async def cmd_my_info(message: types.Message):
                     )
                 ).order_by(QuizResult.ticket_number.asc())
             )
-            tickets = tickets_result.scalars().all()
+            quiz_tickets = quiz_tickets_result.scalars().all()
+            
+            # Получаем билетики из розыгрышей
+            raffle_tickets_result = await session.execute(
+                select(RaffleParticipant).where(
+                    and_(
+                        RaffleParticipant.user_id == user.id,
+                        RaffleParticipant.ticket_number.isnot(None)
+                    )
+                ).order_by(RaffleParticipant.ticket_number.asc())
+            )
+            raffle_tickets = raffle_tickets_result.scalars().all()
+            
+            # Объединяем все билетики и сортируем по номеру
+            all_ticket_numbers = []
+            for ticket in quiz_tickets:
+                all_ticket_numbers.append(ticket.ticket_number)
+            for ticket in raffle_tickets:
+                all_ticket_numbers.append(ticket.ticket_number)
+            all_ticket_numbers.sort()
             
             text = (
                 f"👤 <b>Информация о тебе:</b>\n\n"
                 f"🆔 ID: {user.id}\n"
                 f"👤 Имя: {user.first_name or 'Не указано'}\n"
                 f"⭐ Знак зодиака: {zodiac_name}\n"
+                f"📝 Регистрация: {registration_status}\n"
                 f"📬 Статус: {subscribed_status}\n"
                 f"📅 Дата регистрации: {created_at_str}\n\n"
             )
             
             # Добавляем информацию о билетиках
-            if tickets:
-                ticket_numbers = [str(t.ticket_number) for t in tickets]
+            if all_ticket_numbers:
+                ticket_numbers_str = ', '.join(map(str, all_ticket_numbers))
                 text += (
-                    f"🎫 <b>Лотерейные билетики:</b> {len(tickets)}\n"
-                    f"Номера: {', '.join(ticket_numbers)}"
+                    f"🎫 <b>Лотерейные билетики:</b> {len(all_ticket_numbers)}\n"
+                    f"Номера: {ticket_numbers_str}"
                 )
             else:
                 text += "🎫 <b>Лотерейные билетики:</b> 0"
