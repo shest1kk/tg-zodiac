@@ -821,15 +821,21 @@ async def send_raffle_announcements_for_date(raffle_date: str):
     try:
         # Проверяем, является ли указанная дата датой розыгрыша
         if not is_raffle_date(raffle_date):
-            logger.debug(f"Дата {raffle_date} не является датой розыгрыша")
+            logger.warning(f"❌ Дата {raffle_date} не является датой розыгрыша (не найдена в question.json и RAFFLE_DATES)")
             return
         
         # Проверяем, было ли уже отправлено объявление для этой даты
         # Если время уже прошло и объявления были отправлены, не отправляем повторно
         moscow_now = datetime.now(MOSCOW_TZ)
-        raffle_date_obj = datetime.strptime(raffle_date, "%Y-%m-%d").date()
-        announcement_moscow = datetime.combine(raffle_date_obj, dt_time(hour=RAFFLE_HOUR, minute=RAFFLE_MINUTE))
-        announcement_moscow = announcement_moscow.replace(tzinfo=MOSCOW_TZ)
+        
+        # Получаем время старта из метаданных (если есть) или используем константы
+        from raffle import get_raffle_start_datetime_moscow
+        announcement_moscow = get_raffle_start_datetime_moscow(raffle_date)
+        if not announcement_moscow:
+            # Fallback на константы, если метаданных нет
+            raffle_date_obj = datetime.strptime(raffle_date, "%Y-%m-%d").date()
+            announcement_moscow = datetime.combine(raffle_date_obj, dt_time(hour=RAFFLE_HOUR, minute=RAFFLE_MINUTE))
+            announcement_moscow = announcement_moscow.replace(tzinfo=MOSCOW_TZ)
         
         # Если время объявления уже прошло, проверяем, были ли уже отправлены объявления
         if announcement_moscow < moscow_now:
@@ -874,10 +880,13 @@ async def send_raffle_announcements_for_date(raffle_date: str):
                 error_count += 1
         
         logger.info(
-            f"Рассылка объявлений о розыгрыше завершена. "
-            f"Обработано: {success_count}, Ошибок: {error_count}, "
+            f"✅ Рассылка объявлений о розыгрыше завершена. "
+            f"Успешно отправлено: {success_count}, Ошибок: {error_count}, "
             f"Всего пользователей: {len(users)}"
         )
+        
+        if error_count > 0:
+            logger.warning(f"⚠️ При рассылке объявлений о розыгрыше {raffle_date} произошло {error_count} ошибок из {len(users)} попыток")
         
     except Exception as e:
         logger.error(f"Ошибка при рассылке объявлений о розыгрыше: {e}", exc_info=True)

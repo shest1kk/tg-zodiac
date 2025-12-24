@@ -398,11 +398,21 @@ async def has_raffle_started(raffle_date: str) -> bool:
 
 
 def is_raffle_date(date_str: Optional[str] = None) -> bool:
-    """Проверяет, является ли дата датой розыгрыша"""
+    """Проверяет, является ли дата датой розыгрыша
+    
+    Проверяет наличие даты в question.json (динамические розыгрыши)
+    и в RAFFLE_DATES (для обратной совместимости)
+    """
     if date_str is None:
         current_date = datetime.now(MOSCOW_TZ).date()
         date_str = current_date.strftime("%Y-%m-%d")
     
+    # Сначала проверяем в question.json (динамические розыгрыши)
+    all_dates = get_all_raffle_dates()
+    if date_str in all_dates:
+        return True
+    
+    # Затем проверяем в жестко заданном списке (для обратной совместимости)
     return date_str in RAFFLE_DATES
 
 
