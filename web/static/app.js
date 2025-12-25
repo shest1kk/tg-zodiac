@@ -1952,7 +1952,7 @@ async function denyAnswer(raffleDate, userId) {
     try {
         await apiFetch(`/raffle/${raffleDate}/deny/${userId}`, { method: 'POST' });
         alert('Ответ отклонен!');
-        loadPage('raffle');
+        loadPage('dashboard');
     } catch (error) {
         alert('Ошибка: ' + error.message);
     }

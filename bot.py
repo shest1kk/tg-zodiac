@@ -1741,12 +1741,46 @@ async def cmd_check(message: types.Message):
             quiz_results = quiz_results_result.scalars().all()
             
             # Получаем участие в розыгрышах
+            # Может быть несколько записей для одной даты, выбираем самую актуальную
             raffle_participants_result = await session.execute(
                 select(RaffleParticipant).where(
                     RaffleParticipant.user_id == user_id
-                ).order_by(RaffleParticipant.raffle_date.desc())
+                ).order_by(
+                    RaffleParticipant.raffle_date.desc(),
+                    RaffleParticipant.ticket_number.isnot(None).desc(),  # Сначала записи с билетом
+                    RaffleParticipant.answer.isnot(None).desc(),  # Затем с ответом
+                    RaffleParticipant.timestamp.desc()  # Затем по времени (самая свежая)
+                )
             )
-            raffle_participants = raffle_participants_result.scalars().all()
+            all_raffle_participants = raffle_participants_result.scalars().all()
+            
+            # Группируем по дате и оставляем только самую актуальную запись для каждой даты
+            raffle_participants_dict = {}
+            for participant in all_raffle_participants:
+                if participant.raffle_date not in raffle_participants_dict:
+                    raffle_participants_dict[participant.raffle_date] = participant
+                else:
+                    # Выбираем более приоритетную запись
+                    existing = raffle_participants_dict[participant.raffle_date]
+                    # Приоритет: билет > ответ > время
+                    if participant.ticket_number is not None and existing.ticket_number is None:
+                        # У новой записи есть билет, у существующей нет - выбираем новую
+                        raffle_participants_dict[participant.raffle_date] = participant
+                    elif participant.ticket_number is None and existing.ticket_number is None:
+                        # У обеих нет билета - выбираем с ответом или более свежую
+                        if participant.answer is not None and existing.answer is None:
+                            raffle_participants_dict[participant.raffle_date] = participant
+                        elif participant.answer is not None and existing.answer is not None:
+                            # У обеих есть ответ - выбираем более свежую
+                            if participant.timestamp > existing.timestamp:
+                                raffle_participants_dict[participant.raffle_date] = participant
+                        elif participant.timestamp > existing.timestamp:
+                            # У обеих нет ответа - выбираем более свежую
+                            raffle_participants_dict[participant.raffle_date] = participant
+            
+            raffle_participants = list(raffle_participants_dict.values())
+            # Сортируем по дате (от новых к старым)
+            raffle_participants.sort(key=lambda p: p.raffle_date, reverse=True)
             
             # Формируем текст ответа
             zodiac_name = user.zodiac_name or (ZODIAC_NAMES.get(user.zodiac) if user.zodiac else "Не выбран")

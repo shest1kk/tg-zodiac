@@ -1161,7 +1161,12 @@ async def approve_answer(user_id: int, raffle_date: str) -> bool:
             
             # Проверяем, не выдан ли уже билет
             if participant.ticket_number is not None:
-                logger.warning(f"Билет уже выдан пользователю {user_id} для розыгрыша {raffle_date}")
+                logger.warning(f"Билет уже выдан пользователю {user_id} для розыгрыша {raffle_date}. Билет №{participant.ticket_number}")
+                # Если билет уже выдан, просто обновляем is_correct (если еще не обновлен) и возвращаем True
+                if participant.is_correct is not True:
+                    participant.is_correct = True
+                    await session.commit()
+                return True
             
             participant.is_correct = True
             
