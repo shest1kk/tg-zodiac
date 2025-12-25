@@ -330,13 +330,23 @@ async def check_ticket_time(ticket_number: int, username: str = Depends(get_curr
                     "former": "Бывший сотрудник",  # Поддержка старого формата
                     "other": "Другое"
                 }
+                # Нормализуем статус (убираем пробелы, приводим к нижнему регистру для сравнения)
+                normalized_status = user.registration_status.strip().lower() if user.registration_status else None
+                # Ищем в маппинге (сначала точное совпадение, потом нормализованное)
+                status_display = None
+                if user.registration_status:
+                    status_display = status_map.get(user.registration_status) or status_map.get(normalized_status)
+                    # Если не нашли в маппинге, используем оригинальное значение
+                    if not status_display:
+                        status_display = user.registration_status
+                
                 user_info = {
                     "id": user.id,
                     "username": user.username,
                     "first_name": user.first_name,
                     "registration_completed": user.registration_completed,
                     "registration_status": user.registration_status,
-                    "registration_status_display": status_map.get(user.registration_status, user.registration_status) if user.registration_status else None,
+                    "registration_status_display": status_display,
                     "registration_first_name": user.registration_first_name,
                     "registration_last_name": user.registration_last_name,
                     "registration_position": user.registration_position,
@@ -384,13 +394,23 @@ async def check_ticket_time(ticket_number: int, username: str = Depends(get_curr
                     "former": "Бывший сотрудник",  # Поддержка старого формата
                     "other": "Другое"
                 }
+                # Нормализуем статус (убираем пробелы, приводим к нижнему регистру для сравнения)
+                normalized_status = user.registration_status.strip().lower() if user.registration_status else None
+                # Ищем в маппинге (сначала точное совпадение, потом нормализованное)
+                status_display = None
+                if user.registration_status:
+                    status_display = status_map.get(user.registration_status) or status_map.get(normalized_status)
+                    # Если не нашли в маппинге, используем оригинальное значение
+                    if not status_display:
+                        status_display = user.registration_status
+                
                 user_info = {
                     "id": user.id,
                     "username": user.username,
                     "first_name": user.first_name,
                     "registration_completed": user.registration_completed,
                     "registration_status": user.registration_status,
-                    "registration_status_display": status_map.get(user.registration_status, user.registration_status) if user.registration_status else None,
+                    "registration_status_display": status_display,
                     "registration_first_name": user.registration_first_name,
                     "registration_last_name": user.registration_last_name,
                     "registration_position": user.registration_position,
