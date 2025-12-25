@@ -735,13 +735,14 @@ async def send_raffle_announcement(bot, user_id: int, raffle_date: str, force_se
         try:
             async with AsyncSessionLocal() as session:
                 # Проверяем, есть ли уже запись (может быть создана ранее)
+                # Если есть несколько записей, выбираем самую свежую
                 result = await session.execute(
                     select(RaffleParticipant).where(
                         and_(
                             RaffleParticipant.user_id == user_id,
                             RaffleParticipant.raffle_date == raffle_date
                         )
-                    )
+                    ).order_by(RaffleParticipant.timestamp.desc()).limit(1)
                 )
                 participant = result.scalar_one_or_none()
                 
@@ -819,19 +820,25 @@ async def handle_raffle_participation(bot, user_id: int, message_id: int, raffle
         
         # Проверяем, не участвовал ли уже пользователь в этом розыгрыше
         async with AsyncSessionLocal() as session:
+            # Может быть несколько записей - выбираем запись с question_id != 0 (если есть),
+            # иначе самую свежую запись с question_id == 0
             existing = await session.execute(
                 select(RaffleParticipant).where(
                     and_(
                         RaffleParticipant.user_id == user_id,
                         RaffleParticipant.raffle_date == raffle_date
                     )
-                )
+                ).order_by(
+                    (RaffleParticipant.question_id != 0).desc(),  # Сначала записи с question_id != 0
+                    RaffleParticipant.timestamp.desc()  # Затем по времени (самая свежая)
+                ).limit(1)
             )
             existing_participant = existing.scalar_one_or_none()
             
             if existing_participant:
                 # Если уже есть запись с question_id != 0, значит уже участвует
                 if existing_participant.question_id != 0:
+                    logger.warning(f"Пользователь {user_id} уже участвует в розыгрыше {raffle_date}")
                     return False
                 
                 # Если запись есть, но question_id == 0, обновляем её
@@ -1133,17 +1140,23 @@ async def approve_answer(user_id: int, raffle_date: str) -> bool:
     """Принимает ответ пользователя и выдает билет с номером"""
     try:
         async with AsyncSessionLocal() as session:
-            participant = await session.execute(
+            # Может быть несколько записей для одного пользователя и даты
+            # Выбираем запись с ответом (answer is not None), если есть, иначе самую свежую
+            result = await session.execute(
                 select(RaffleParticipant).where(
                     and_(
                         RaffleParticipant.user_id == user_id,
                         RaffleParticipant.raffle_date == raffle_date
                     )
-                )
+                ).order_by(
+                    RaffleParticipant.answer.isnot(None).desc(),  # Сначала записи с ответом
+                    RaffleParticipant.timestamp.desc()  # Затем по времени (самая свежая)
+                ).limit(1)
             )
-            participant = participant.scalar_one_or_none()
+            participant = result.scalar_one_or_none()
             
             if not participant:
+                logger.warning(f"Участник не найден: user_id={user_id}, raffle_date={raffle_date}")
                 return False
             
             # Проверяем, не выдан ли уже билет
@@ -1199,17 +1212,23 @@ async def deny_answer(user_id: int, raffle_date: str) -> bool:
     """Отклоняет ответ пользователя"""
     try:
         async with AsyncSessionLocal() as session:
-            participant = await session.execute(
+            # Может быть несколько записей для одного пользователя и даты
+            # Выбираем запись с ответом (answer is not None), если есть, иначе самую свежую
+            result = await session.execute(
                 select(RaffleParticipant).where(
                     and_(
                         RaffleParticipant.user_id == user_id,
                         RaffleParticipant.raffle_date == raffle_date
                     )
-                )
+                ).order_by(
+                    RaffleParticipant.answer.isnot(None).desc(),  # Сначала записи с ответом
+                    RaffleParticipant.timestamp.desc()  # Затем по времени (самая свежая)
+                ).limit(1)
             )
-            participant = participant.scalar_one_or_none()
+            participant = result.scalar_one_or_none()
             
             if not participant:
+                logger.warning(f"Участник не найден для отклонения: user_id={user_id}, raffle_date={raffle_date}")
                 return False
             
             participant.is_correct = False

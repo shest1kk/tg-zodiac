@@ -1942,7 +1942,7 @@ async function approveAnswer(raffleDate, userId) {
     try {
         await apiFetch(`/raffle/${raffleDate}/approve/${userId}`, { method: 'POST' });
         alert('Ответ одобрен!');
-        loadPage('raffle');
+        loadPage('dashboard');
     } catch (error) {
         alert('Ошибка: ' + error.message);
     }
