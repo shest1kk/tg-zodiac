@@ -325,7 +325,9 @@ async def check_ticket_time(ticket_number: int, username: str = Depends(get_curr
             if user:
                 status_map = {
                     "current_employee": "Действующий сотрудник",
+                    "current": "Действующий сотрудник",  # Поддержка старого формата
                     "former_employee": "Бывший сотрудник",
+                    "former": "Бывший сотрудник",  # Поддержка старого формата
                     "other": "Другое"
                 }
                 user_info = {
@@ -377,7 +379,9 @@ async def check_ticket_time(ticket_number: int, username: str = Depends(get_curr
             if user:
                 status_map = {
                     "current_employee": "Действующий сотрудник",
+                    "current": "Действующий сотрудник",  # Поддержка старого формата
                     "former_employee": "Бывший сотрудник",
+                    "former": "Бывший сотрудник",  # Поддержка старого формата
                     "other": "Другое"
                 }
                 user_info = {
